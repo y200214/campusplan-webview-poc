@@ -70,6 +70,11 @@ fun rememberPortalWebView(
                     reinstallObserverIfEnabled(webView, viewModel, probe)
                     // シラバス取得待ちがあれば、参照画面に着いた時点で続きを行う
                     syllabusFlow.onPageFinished(webView, url)
+                    // 履修時間割ページに着いたら、独自 UI の科目一覧を自動で出す。
+                    // 調査ツールを開かせる手順を挟まないため（Phase 5）。
+                    if (url != null && url.endsWith("/portal/TimeTable")) {
+                        autoExtractTimeTable(webView, viewModel, probe, attempt = 0)
+                    }
                 }
 
                 override fun onUrlChanged(url: String?) {
@@ -113,6 +118,33 @@ fun rememberPortalWebView(
         webView.loadAllowedUrl(PortalConfig.START_URL)
         webView
     }
+}
+
+/**
+ * 履修時間割の自動抽出。
+ *
+ * onPageFinished の時点では時間割の表がまだ描画されていないことがある
+ * （0 件で返ってくるのを実機で確認済み）。描画完了を待つイベントは無いので、
+ * 科目が取れるまで少し置いて数回リトライする。
+ * 取れなかった場合は何も出さない（空のパネルを出してユーザーを止めない）。
+ */
+private fun autoExtractTimeTable(
+    webView: WebView,
+    viewModel: PortalViewModel,
+    probe: PageProbe,
+    attempt: Int,
+) {
+    webView.postDelayed({
+        // 待っている間に別ページへ移動していたら中止
+        if (webView.url?.endsWith("/portal/TimeTable") != true) return@postDelayed
+        probe.runTimeTable(webView) { table ->
+            if (table != null && table.entries.isNotEmpty()) {
+                viewModel.onTimeTableResult(table)
+            } else if (attempt < 5) {
+                autoExtractTimeTable(webView, viewModel, probe, attempt + 1)
+            }
+        }
+    }, if (attempt == 0) 600L else 900L)
 }
 
 /**

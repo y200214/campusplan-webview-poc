@@ -57,6 +57,8 @@ import jp.naramed.campusplanpoc.model.ApiResponse
 import jp.naramed.campusplanpoc.model.NetworkObservation
 import jp.naramed.campusplanpoc.model.PageStructure
 import jp.naramed.campusplanpoc.model.PortalShortcut
+import jp.naramed.campusplanpoc.model.SyllabusDetail
+import jp.naramed.campusplanpoc.model.SyllabusHtml
 import jp.naramed.campusplanpoc.model.TimeTable
 import jp.naramed.campusplanpoc.model.PortalEvent
 import jp.naramed.campusplanpoc.model.SessionState
@@ -273,12 +275,24 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
                 }
 
                 if (state.showApi) {
-                    ApiPanel(
-                        label = state.apiLabel,
-                        loading = state.apiLoading,
-                        response = state.apiResponse,
-                        onClose = { viewModel.setShowApi(false) },
-                    )
+                    // シラバスの結果は独自 UI で出す。生 JSON/HTML を出す ApiPanel は
+                    // それ以外の API（調査ツール）用に残す。
+                    val syllabusMeta = state.apiResponse?.syllabus
+                    if (state.apiLoading && state.apiLabel.startsWith("シラバス") || syllabusMeta != null) {
+                        SyllabusPanel(
+                            label = state.apiLabel,
+                            loading = state.apiLoading,
+                            response = state.apiResponse,
+                            onClose = { viewModel.setShowApi(false) },
+                        )
+                    } else {
+                        ApiPanel(
+                            label = state.apiLabel,
+                            loading = state.apiLoading,
+                            response = state.apiResponse,
+                            onClose = { viewModel.setShowApi(false) },
+                        )
+                    }
                 }
 
                 if (state.showNetwork) {
@@ -776,6 +790,128 @@ private fun ApiRow(
             OutlinedButton(onClick = { onCall(e) }) { Text("API: ${e.label}") }
         }
         OutlinedButton(onClick = onCompare) { Text("401原因の比較テスト") }
+    }
+}
+
+/**
+ * Phase 5: シラバスの独自 UI。
+ *
+ * webmvc が返した HTML を [SyllabusHtml] で (ラベル, 本文) に分解し、
+ * セクションのカードとして出す。生 HTML は画面に出さない。
+ */
+@Composable
+private fun SyllabusPanel(
+    label: String,
+    loading: Boolean,
+    response: ApiResponse?,
+    onClose: () -> Unit,
+) {
+    val meta = response?.syllabus
+    // パースは本文が変わったときだけやり直す
+    val detail: SyllabusDetail? = remember(response?.body) {
+        if (meta != null && meta.bodyFetched && response.body.isNotEmpty()) {
+            SyllabusHtml.parse(response.body)
+        } else null
+    }
+
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.surface,
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = when {
+                            detail != null && detail.title.isNotEmpty() -> detail.title
+                            meta != null && meta.kogiNm.isNotEmpty() -> meta.kogiNm
+                            else -> label.removePrefix("シラバス").trim().ifEmpty { "シラバス" }
+                        },
+                        style = MaterialTheme.typography.titleLarge,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    val subtitle = when {
+                        loading -> "取得中…"
+                        meta == null && response != null && !response.ok -> "取得できませんでした"
+                        meta != null -> "講義コード ${meta.kogiCd}"
+                        else -> ""
+                    }
+                    if (subtitle.isNotEmpty()) {
+                        Text(subtitle, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+                TextButton(onClick = onClose) { Text("閉じる") }
+            }
+
+            if (loading) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+            HorizontalDivider()
+
+            when {
+                loading -> {
+                    Text(
+                        "シラバスを取得しています…",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(16.dp),
+                    )
+                }
+                meta != null && meta.notRegistered -> {
+                    // 未登録は正常系。エラーの見た目にしない
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Text("シラバス未登録", style = MaterialTheme.typography.titleMedium)
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                "この講義（${meta.kogiCd}）のシラバスはポータルに登録されていません。",
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                        }
+                    }
+                }
+                detail != null && detail.sections.isNotEmpty() -> {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                            horizontal = 16.dp, vertical = 12.dp,
+                        ),
+                    ) {
+                        items(detail.sections) { section ->
+                            Card(modifier = Modifier.fillMaxWidth()) {
+                                Column(modifier = Modifier.padding(14.dp)) {
+                                    Text(
+                                        section.label,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(section.text, style = MaterialTheme.typography.bodyMedium)
+                                }
+                            }
+                        }
+                    }
+                }
+                else -> {
+                    Text(
+                        response?.error ?: "取得できませんでした",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(16.dp),
+                    )
+                }
+            }
+        }
     }
 }
 
