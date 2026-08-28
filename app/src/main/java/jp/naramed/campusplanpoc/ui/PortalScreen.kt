@@ -32,6 +32,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -63,6 +64,8 @@ import jp.naramed.campusplanpoc.model.ApiResponse
 import jp.naramed.campusplanpoc.model.NetworkObservation
 import jp.naramed.campusplanpoc.model.PageStructure
 import jp.naramed.campusplanpoc.model.PortalShortcut
+import jp.naramed.campusplanpoc.model.SearchUiState
+import jp.naramed.campusplanpoc.model.SyllabusSearchResult
 import jp.naramed.campusplanpoc.model.SyllabusDetail
 import jp.naramed.campusplanpoc.model.SyllabusDigest
 import jp.naramed.campusplanpoc.model.SyllabusHtml
@@ -110,6 +113,42 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
             probe.installNetObserver(webView) { }
         }
         syllabusFlow.open(webView, kogiCd, "2026") { res -> viewModel.onApiResponse(res) }
+    }
+
+    /**
+     * シラバス検索の画面を開く。
+     *
+     * 検索の実行にはページ側のフォームが必要なので、WebView を検索ページへ送っておく。
+     * ユーザーにはネイティブの検索画面だけを見せる（ポータルは覆ったまま）。
+     */
+    val openSearch: () -> Unit = {
+        viewModel.navigate(PortalViewModel.AppScreen.SYLLABUS_SEARCH)
+        if (!PortalConfig.isSyllabusKensakuUrl(webView.url)) {
+            webView.loadAllowedUrl(
+                PortalConfig.absoluteUrl("/portal/External/RedirectLinkCpSmart?linkid=1900/3000090")
+            )
+        }
+    }
+
+    /** 入力された条件で検索する。ページのフォームを動かして応答だけ受け取る。 */
+    val runSearch: () -> Unit = {
+        val s = viewModel.state.value.search
+        if (!PortalConfig.isSyllabusKensakuUrl(webView.url)) {
+            viewModel.onSearchResult(
+                jp.naramed.campusplanpoc.model.SyllabusSearchResult(
+                    ok = false,
+                    error = "検索ページの準備がまだです。少し待ってからもう一度お試しください",
+                )
+            )
+        } else {
+            viewModel.onSearchStarted()
+            // IME が全角で確定しがちなので、送る前に半角へ寄せる
+            fetcher.searchSyllabus(
+                webView,
+                jp.naramed.campusplanpoc.model.normalizeSearchTerm(s.kogiCd),
+                jp.naramed.campusplanpoc.model.normalizeSearchTerm(s.kogiNm),
+            ) { res -> viewModel.onSearchResult(res) }
+        }
     }
 
     /**
@@ -285,6 +324,7 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
         PortalViewModel.AppScreen.HOME -> "CampusPlan"
         PortalViewModel.AppScreen.TIMETABLE -> "履修時間割"
         PortalViewModel.AppScreen.SYLLABUS_LIST -> "シラバス一覧"
+        PortalViewModel.AppScreen.SYLLABUS_SEARCH -> "シラバス検索"
         PortalViewModel.AppScreen.PORTAL -> state.portalTitle.ifBlank { "ポータル" }
         PortalViewModel.AppScreen.DEV_TOOLS -> "開発ツール"
     }
@@ -446,6 +486,7 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
                         PortalViewModel.AppScreen.HOME -> HomePanel(
                             onOpenTimeTable = { openTimeTable(false) },
                             onOpenSyllabusList = { openTimeTable(true) },
+                            onOpenSearch = openSearch,
                             onOpenPortalFeature = { shortcut ->
                                 viewModel.openPortalView(shortcut.label)
                                 webView.loadAllowedUrl(PortalConfig.absoluteUrl(shortcut.path))
@@ -467,6 +508,14 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
                                 LoadingScreen("履修時間割を読み込んでいます…")
                             }
                         }
+
+                        PortalViewModel.AppScreen.SYLLABUS_SEARCH -> SyllabusSearchPanel(
+                            state = state.search,
+                            onKogiCdChange = viewModel::setSearchKogiCd,
+                            onKogiNmChange = viewModel::setSearchKogiNm,
+                            onSearch = runSearch,
+                            onRowClick = { row -> openSyllabus(row.kogiCd, row.kogiNm) },
+                        )
 
                         PortalViewModel.AppScreen.SYLLABUS_LIST -> {
                             val digest = state.syllabusDigest
@@ -1025,13 +1074,16 @@ private fun ApiRow(
 private fun HomePanel(
     onOpenTimeTable: () -> Unit,
     onOpenSyllabusList: () -> Unit,
+    onOpenSearch: () -> Unit,
     onOpenPortalFeature: (PortalShortcut) -> Unit,
 ) {
     // ネイティブ UI を持つ機能と、まだポータルを開くしかない機能を分けて出す。
     // 後者はタップするとアプリ内ブラウザになることが分かる書き方にしてある。
-    val portalOnly = PortalConfig.SHORTCUTS.filter {
-        it.path != "/portal/TimeTable"
-    }
+    val nativePaths = setOf(
+        "/portal/TimeTable",
+        "/portal/External/RedirectLinkCpSmart?linkid=1900/3000090",
+    )
+    val portalOnly = PortalConfig.SHORTCUTS.filter { it.path !in nativePaths }
 
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -1057,6 +1109,13 @@ private fun HomePanel(
                     title = "シラバス一覧",
                     subtitle = "履修科目のシラバスをまとめて取得して読む",
                     onClick = onOpenSyllabusList,
+                )
+            }
+            item {
+                HomeCard(
+                    title = "シラバス検索",
+                    subtitle = "講義コードや名称で探す",
+                    onClick = onOpenSearch,
                 )
             }
 
@@ -1110,6 +1169,136 @@ private fun HomeCard(title: String, subtitle: String, onClick: () -> Unit) {
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onPrimaryContainer,
             )
+        }
+    }
+}
+
+/**
+ * Phase 5: シラバス検索の独自 UI。
+ *
+ * 入力欄も結果もネイティブ。ポータルの検索画面は裏で開いたままで、
+ * 検索の実行時にだけ、そのフォームを動かして応答を受け取る
+ * （リクエストの組み立てはページに任せる。js/syllabus_search.js 参照）。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SyllabusSearchPanel(
+    state: SearchUiState,
+    onKogiCdChange: (String) -> Unit,
+    onKogiNmChange: (String) -> Unit,
+    onSearch: () -> Unit,
+    onRowClick: (SyllabusSearchResult.Row) -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.surface,
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                OutlinedTextField(
+                    value = state.kogiCd,
+                    onValueChange = onKogiCdChange,
+                    label = { Text("講義コード") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = state.kogiNm,
+                    onValueChange = onKogiNmChange,
+                    label = { Text("講義名称") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Button(
+                    onClick = onSearch,
+                    enabled = !state.running,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(if (state.running) "検索中…" else "検索")
+                }
+            }
+
+            if (state.running) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+            HorizontalDivider()
+
+            val result = state.result
+            when {
+                state.running -> Text(
+                    "検索しています…",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(16.dp),
+                )
+
+                result != null && !result.ok -> Text(
+                    result.error ?: "検索に失敗しました",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(16.dp),
+                )
+
+                result != null && result.rows.isEmpty() -> Text(
+                    "該当する講義はありませんでした。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(16.dp),
+                )
+
+                result != null -> {
+                    Text(
+                        buildString {
+                            append("${result.rows.size} 件")
+                            if (result.truncated) append("（全 ${result.total} 件のうち先頭のみ）")
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                    )
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(
+                            start = 16.dp, end = 16.dp, bottom = 16.dp,
+                        ),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        items(result.rows) { row ->
+                            Card(
+                                onClick = { onRowClick(row) },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Column(modifier = Modifier.padding(14.dp)) {
+                                    Text(
+                                        row.kogiNm.ifBlank { row.kogiCd },
+                                        style = MaterialTheme.typography.titleSmall,
+                                    )
+                                    Text(
+                                        buildString {
+                                            append("講義コード ${row.kogiCd}")
+                                            if (row.kaikojiki.isNotBlank()) append(" ・ ${row.kaikojiki}")
+                                            if (row.kyoin.isNotBlank()) append(" ・ ${row.kyoin}")
+                                        },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    Text(
+                                        "タップでシラバスを開く",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                else -> Text(
+                    "講義コードか講義名称を入れて検索してください。どちらも部分一致します。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(16.dp),
+                )
+            }
         }
     }
 }

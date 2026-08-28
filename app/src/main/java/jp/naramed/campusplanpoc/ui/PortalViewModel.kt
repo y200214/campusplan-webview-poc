@@ -8,7 +8,9 @@ import jp.naramed.campusplanpoc.model.NetworkObservation
 import jp.naramed.campusplanpoc.model.PageStructure
 import jp.naramed.campusplanpoc.model.PortalEvent
 import jp.naramed.campusplanpoc.model.SessionState
+import jp.naramed.campusplanpoc.model.SearchUiState
 import jp.naramed.campusplanpoc.model.SyllabusDigest
+import jp.naramed.campusplanpoc.model.SyllabusSearchResult
 import jp.naramed.campusplanpoc.model.TimeTable
 import jp.naramed.campusplanpoc.security.UrlPolicy
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -40,6 +42,7 @@ class PortalViewModel : ViewModel() {
         HOME,
         TIMETABLE,
         SYLLABUS_LIST,
+        SYLLABUS_SEARCH,
         /** アプリ内ブラウザ。ネイティブ UI が無い機能を「意図的に」ポータルで開く */
         PORTAL,
         /** 開発用（debug ビルドのみ） */
@@ -99,6 +102,8 @@ class PortalViewModel : ViewModel() {
         val everLoggedIn: Boolean = false,
         /** 時間割の取得待ち（ネイティブのローディングを出すため） */
         val timeTableLoading: Boolean = false,
+        /** Phase 5: シラバス検索（独自 UI から入力して実行する） */
+        val search: SearchUiState = SearchUiState(),
     ) {
         /** ログイン画面を出すべきか */
         val needsLogin: Boolean
@@ -227,6 +232,26 @@ class PortalViewModel : ViewModel() {
 
     fun setTimeTableLoading(loading: Boolean) {
         _state.update { it.copy(timeTableLoading = loading) }
+    }
+
+    // --- シラバス検索 -------------------------------------------------------
+
+    fun setSearchKogiCd(v: String) {
+        _state.update { it.copy(search = it.search.copy(kogiCd = v)) }
+    }
+
+    fun setSearchKogiNm(v: String) {
+        _state.update { it.copy(search = it.search.copy(kogiNm = v)) }
+    }
+
+    fun onSearchStarted() {
+        _state.update { it.copy(search = it.search.copy(running = true, result = null)) }
+    }
+
+    fun onSearchResult(result: SyllabusSearchResult) {
+        _state.update {
+            it.copy(search = it.search.copy(running = false, searched = true, result = result))
+        }
     }
 
     fun onStructureResult(structure: PageStructure?) {

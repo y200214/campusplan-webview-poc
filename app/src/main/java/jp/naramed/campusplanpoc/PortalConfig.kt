@@ -147,4 +147,8 @@ object PortalConfig {
     /** シラバス参照画面かどうか。遷移完了の判定に使う。 */
     fun isSyllabusSanshoUrl(url: String?): Boolean =
         url != null && url.contains("/wsl/SyllabusSansho", ignoreCase = true)
+
+    /** シラバス検索画面かどうか。独自 UI からの検索はこの画面でしか動かない。 */
+    fun isSyllabusKensakuUrl(url: String?): Boolean =
+        url != null && url.contains("/wsl/SyllabusKensaku", ignoreCase = true)
 }

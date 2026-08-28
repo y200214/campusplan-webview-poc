@@ -4,6 +4,7 @@ import android.content.res.AssetManager
 import android.util.Log
 import android.webkit.WebView
 import jp.naramed.campusplanpoc.model.ApiResponse
+import jp.naramed.campusplanpoc.model.SyllabusSearchResult
 import jp.naramed.campusplanpoc.security.UrlPolicy
 import kotlinx.serialization.json.Json
 import org.json.JSONArray
@@ -27,6 +28,7 @@ class PageFetcher(private val assets: AssetManager) {
         private const val SCRIPT = "js/fetch_api.js"
         private const val SCRIPT_COMPARE = "js/api_compare.js"
         private const val SCRIPT_SYLLABUS = "js/syllabus_fetch.js"
+        private const val SCRIPT_SEARCH = "js/syllabus_search.js"
 
         /** ログへ出してはいけないキー */
         private val REDACT_KEYS = setOf(
@@ -51,8 +53,58 @@ class PageFetcher(private val assets: AssetManager) {
         assets.open(path).bufferedReader().use { it.readText() }
     }
 
+    /** 検索の応答待ち。API 応答とは形が違うので別に持つ。 */
+    private val pendingSearch = mutableMapOf<String, (SyllabusSearchResult) -> Unit>()
+
+    /**
+     * シラバス検索を実行する。
+     *
+     * 検索条件はページのフォームに入れ、押すのはページ本来の検索ボタン。
+     * リクエストの組み立てはページに任せ、こちらは応答だけ受け取る。
+     * シラバス検索の画面を表示した状態で呼ぶこと。
+     */
+    fun searchSyllabus(
+        webView: WebView,
+        kogiCd: String,
+        kogiNm: String,
+        onResult: (SyllabusSearchResult) -> Unit,
+    ) {
+        if (!UrlPolicy.isAllowed(webView.url)) {
+            onResult(SyllabusSearchResult(ok = false, error = "現在のページが allowlist 外です"))
+            return
+        }
+        val id = "search-${counter++}"
+        pendingSearch[id] = onResult
+
+        val script = template(SCRIPT_SEARCH)
+            .replace("__KOGICD__", JSONObject.quote(kogiCd))
+            .replace("__KOGINM__", JSONObject.quote(kogiNm))
+            .replace("__ID__", JSONObject.quote(id))
+
+        Log.d(TAG, "シラバス検索: コード=${kogiCd.ifEmpty { "-" }} 名称=${kogiNm.ifEmpty { "-" }} id=$id")
+        webView.evaluateJavascript(script, null)
+    }
+
     /** PortalBridge のコールバックから呼ぶ。メインスレッドで呼ばれる。 */
     fun onBridgeMessage(raw: String) {
+        // 応答が 2 種類あるので、まず id で振り分ける
+        val id = runCatching { JSONObject(JSONTokener(raw).nextValue().toString()).optString("id") }
+            .getOrNull().orEmpty()
+        if (id.isNotEmpty() && pendingSearch.containsKey(id)) {
+            val callback = pendingSearch.remove(id)
+            val result = runCatching { json.decodeFromString<SyllabusSearchResult>(raw) }
+                .onFailure { Log.w(TAG, "検索応答を解析できない: ${it.javaClass.simpleName}") }
+                .getOrNull()
+                ?: SyllabusSearchResult(ok = false, error = "検索応答を解析できませんでした")
+            Log.d(
+                TAG,
+                "検索結果: ok=${result.ok} 件数=${result.rows.size} " +
+                    "総数=${result.total} 打切=${result.truncated} error=${result.error ?: "-"}"
+            )
+            callback?.invoke(result)
+            return
+        }
+
         val response = runCatching { json.decodeFromString<ApiResponse>(raw) }
             .onFailure { Log.w(TAG, "ブリッジ応答を解析できない: ${it.javaClass.simpleName}") }
             .getOrNull() ?: return
