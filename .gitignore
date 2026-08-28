@@ -1,0 +1,17 @@
+# Gradle / ビルド成果物
+.gradle/
+build/
+/captures
+.externalNativeBuild
+.cxx
+.kotlin/
+
+# IDE
+*.iml
+/.idea/
+
+# マシン固有（SDK のパスなど。コミットしない）
+local.properties
+
+# macOS
+.DS_Store

@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!--
+      base-config:
+        cleartextTrafficPermitted="false" … アプリ全体で平文 HTTP を禁止
+        trust-anchors は system のみ … 端末にインストールされたユーザー CA を信頼しない
+                                        （中間者プロキシによる盗聴を防ぐ）
+
+      注意:
+        社内 MITM プロキシ経由でしか通らない環境で debug 時のみ検証したい場合は、
+        app/src/debug/res/xml/network_security_config.xml を別途用意し、
+        <debug-overrides> で user CA を追加すること。
+        release ビルドの設定は絶対に緩めない。
+    -->
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="false">campusplanportal.naramed-u.ac.jp</domain>
+        <!-- WebClass (LMS)。時間割の科目リンクが SSO でここへ遷移する -->
+        <domain includeSubdomains="false">naramed-u.webclass.jp</domain>
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+        <!--
+          証明書ピンニングは意図的に設定していない。
+          大学側の証明書更新でアプリが即座に使用不能になるリスクの方が大きいため。
+          必要になった場合は <pin-set> を expiration 付きで追加すること。
+        -->
+    </domain-config>
+</network-security-config>
