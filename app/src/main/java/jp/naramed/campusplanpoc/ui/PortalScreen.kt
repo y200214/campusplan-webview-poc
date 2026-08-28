@@ -3,7 +3,16 @@ package jp.naramed.campusplanpoc.ui
 import android.util.Log
 import android.webkit.WebView
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.surfaceColorAtElevation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -331,7 +340,13 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
 
     Scaffold(
         topBar = {
+            // ヘッダーは背景と地続きにして、下に細い境界線だけ引く
+            Column {
             TopAppBar(
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    titleContentColor = MaterialTheme.colorScheme.onSurface,
+                ),
                 title = {
                     Text(screenTitle, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 },
@@ -356,6 +371,8 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
                     }
                 },
             )
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            }
         }
     ) { innerPadding ->
         Column(
@@ -585,19 +602,36 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
     }
 }
 
+/**
+ * ログイン状態の表示。
+ *
+ * 常時出る要素なので、枠付きチップではなく小さな点＋文字にして主張を抑える。
+ * ここが目立つと、本来の主役である機能カードと視線を奪い合う。
+ */
 @Composable
 private fun SessionChip(sessionState: SessionState) {
+    val success = if (isSystemInDarkTheme()) AppColors.successDark else AppColors.successLight
     val (label, color) = when (sessionState) {
-        SessionState.UNKNOWN -> "状態不明" to Color(0xFF9E9E9E)
-        SessionState.LOGIN_REQUIRED -> "ログイン画面" to Color(0xFFEF6C00)
-        SessionState.LOGGED_IN_PROBABLE -> "ログイン済み(推定)" to Color(0xFF2E7D32)
+        SessionState.UNKNOWN -> "確認中" to MaterialTheme.colorScheme.onSurfaceVariant
+        SessionState.LOGIN_REQUIRED -> "未ログイン" to MaterialTheme.colorScheme.error
+        SessionState.LOGGED_IN_PROBABLE -> "ログイン中" to success
     }
-    AssistChip(
-        onClick = {},
-        label = { Text(label) },
-        colors = AssistChipDefaults.assistChipColors(labelColor = color),
-        modifier = Modifier.padding(end = 8.dp),
-    )
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.padding(end = 4.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .background(color, CircleShape),
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+            label,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
 }
 
 @Composable
@@ -1095,7 +1129,12 @@ private fun HomePanel(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item {
-                Text("履修", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "履修",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 4.dp, bottom = 2.dp),
+                )
             }
             item {
                 HomeCard(
@@ -1120,24 +1159,35 @@ private fun HomePanel(
             }
 
             item {
-                Spacer(modifier = Modifier.height(8.dp))
-                Text("ポータルで開く", style = MaterialTheme.typography.titleMedium)
+                Spacer(modifier = Modifier.height(12.dp))
                 Text(
-                    "アプリ内のブラウザでポータルの画面を表示します。",
-                    style = MaterialTheme.typography.bodySmall,
+                    "ポータルで開く",
+                    style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 4.dp, bottom = 2.dp),
                 )
             }
             items(portalOnly) { shortcut ->
                 Card(
                     onClick = { onOpenPortalFeature(shortcut) },
                     modifier = Modifier.fillMaxWidth(),
+                    shape = MaterialTheme.shapes.medium,
+                    colors = listCardColors(),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+                    border = listCardBorder(),
                 ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Text(shortcut.label, style = MaterialTheme.typography.titleSmall)
+                    Row(
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
                         Text(
-                            "ポータルの画面を開く",
-                            style = MaterialTheme.typography.bodySmall,
+                            shortcut.label,
+                            style = MaterialTheme.typography.titleSmall,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Text(
+                            "ブラウザ",
+                            style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
@@ -1147,27 +1197,32 @@ private fun HomePanel(
     }
 }
 
+/**
+ * ホームの主要導線カード。
+ *
+ * この画面の主役なので、一覧のカードより一段強く出す。
+ * 色面で塗り、余白を広めに取って「押せる」ことを明示する。
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun HomeCard(title: String, subtitle: String, onClick: () -> Unit) {
     Card(
         onClick = onClick,
         modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.primaryContainer,
+            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
         ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
     ) {
-        Column(modifier = Modifier.padding(20.dp)) {
-            Text(
-                title,
-                style = MaterialTheme.typography.titleLarge,
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
-            )
+        Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 18.dp)) {
+            Text(title, style = MaterialTheme.typography.titleLarge)
             Spacer(modifier = Modifier.height(4.dp))
             Text(
                 subtitle,
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.78f),
             )
         }
     }
@@ -1214,7 +1269,9 @@ private fun SyllabusSearchPanel(
                 Button(
                     onClick = onSearch,
                     enabled = !state.running,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 52.dp),
                 ) {
                     Text(if (state.running) "検索中…" else "検索")
                 }
@@ -1266,6 +1323,10 @@ private fun SyllabusSearchPanel(
                             Card(
                                 onClick = { onRowClick(row) },
                                 modifier = Modifier.fillMaxWidth(),
+                                shape = MaterialTheme.shapes.medium,
+                                colors = listCardColors(),
+                                elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+                                border = listCardBorder(),
                             ) {
                                 Column(modifier = Modifier.padding(14.dp)) {
                                     Text(
@@ -1302,6 +1363,20 @@ private fun SyllabusSearchPanel(
         }
     }
 }
+
+/**
+ * 一覧のカード。
+ *
+ * 影ではなく「わずかに浮いた面 + 細い境界線」で区切る。
+ * 影を重ねると要素が多い画面でうるさくなるため。
+ */
+@Composable
+private fun listCardColors() = CardDefaults.cardColors(
+    containerColor = MaterialTheme.colorScheme.surfaceColorAtElevation(2.dp),
+)
+
+@Composable
+private fun listCardBorder() = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
 
 /** データ取得中に WebView を隠しておくための、ネイティブのつなぎ画面 */
 @Composable
@@ -1384,6 +1459,10 @@ private fun SyllabusDigestCard(item: SyllabusDigest.Item) {
     Card(
         onClick = { if (registered) expanded = !expanded },
         modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.medium,
+        colors = listCardColors(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        border = listCardBorder(),
     ) {
         Column(modifier = Modifier.padding(14.dp)) {
             Row(
@@ -1442,10 +1521,12 @@ private fun SyllabusDigestCard(item: SyllabusDigest.Item) {
 
 @Composable
 private fun StatusBadge(status: SyllabusDigest.Status) {
+    // 未登録は異常ではないので、警告色ではなく控えめなグレーで出す
+    val success = if (isSystemInDarkTheme()) AppColors.successDark else AppColors.successLight
     val (label, color) = when (status) {
-        SyllabusDigest.Status.PENDING -> "取得中" to MaterialTheme.colorScheme.outline
-        SyllabusDigest.Status.REGISTERED -> "あり" to MaterialTheme.colorScheme.primary
-        SyllabusDigest.Status.NOT_REGISTERED -> "未登録" to MaterialTheme.colorScheme.outline
+        SyllabusDigest.Status.PENDING -> "取得中" to MaterialTheme.colorScheme.onSurfaceVariant
+        SyllabusDigest.Status.REGISTERED -> "あり" to success
+        SyllabusDigest.Status.NOT_REGISTERED -> "未登録" to MaterialTheme.colorScheme.onSurfaceVariant
         SyllabusDigest.Status.ERROR -> "取得失敗" to MaterialTheme.colorScheme.error
     }
     Text(label, style = MaterialTheme.typography.labelMedium, color = color)
@@ -1527,6 +1608,10 @@ private fun SyllabusPanel(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(16.dp),
+                        shape = MaterialTheme.shapes.medium,
+                        colors = listCardColors(),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+                        border = listCardBorder(),
                     ) {
                         Column(modifier = Modifier.padding(16.dp)) {
                             Text("シラバス未登録", style = MaterialTheme.typography.titleMedium)
@@ -1702,7 +1787,8 @@ private fun TimeTablePanel(
                 onClick = onDigestAll,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                    .heightIn(min = 52.dp),
             ) {
                 Text("全科目のシラバスをまとめて取得")
             }
