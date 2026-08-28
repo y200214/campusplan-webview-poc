@@ -27,6 +27,25 @@ import kotlinx.coroutines.flow.update
  */
 class PortalViewModel : ViewModel() {
 
+    /**
+     * アプリの画面。
+     *
+     * 原則: [LOGIN] と [PORTAL] 以外では、WebView を必ず不透明なネイティブ画面で覆う。
+     * WebView は破棄せず裏で動かし続ける（セッションとデータ取得のエンジン）。
+     * 素のポータルが意図せず見えるのは、この 2 つ以外では不具合とみなす。
+     */
+    enum class AppScreen {
+        /** 本人がポータル上でログインする画面。ここだけは WebView を見せる必要がある */
+        LOGIN,
+        HOME,
+        TIMETABLE,
+        SYLLABUS_LIST,
+        /** アプリ内ブラウザ。ネイティブ UI が無い機能を「意図的に」ポータルで開く */
+        PORTAL,
+        /** 開発用（debug ビルドのみ） */
+        DEV_TOOLS,
+    }
+
     data class UiState(
         /** 表示用 URL。クエリは落としてある（スクリーンショット経由の漏洩を避けるため） */
         val displayUrl: String = "(未読み込み)",
@@ -66,7 +85,25 @@ class PortalViewModel : ViewModel() {
         val observedExternalHosts: Set<String> = emptySet(),
         val hostAllowed: Boolean = false,
         val canGoBack: Boolean = false,
-    )
+        /** 現在のアプリ画面 */
+        val screen: AppScreen = AppScreen.HOME,
+        /** アプリ内ブラウザのタイトル（どの機能を開いているか） */
+        val portalTitle: String = "",
+        /**
+         * 一度でもログイン済みと判定できたか。
+         *
+         * sessionState はページ遷移のたびに UNKNOWN へ落ちるため、それだけで
+         * ログイン画面へ戻すと、遷移のたびに素のポータルが一瞬見えてしまう。
+         * 「明示的に LOGIN_REQUIRED を観測するまではログイン済みとみなす」ために持つ。
+         */
+        val everLoggedIn: Boolean = false,
+        /** 時間割の取得待ち（ネイティブのローディングを出すため） */
+        val timeTableLoading: Boolean = false,
+    ) {
+        /** ログイン画面を出すべきか */
+        val needsLogin: Boolean
+            get() = !everLoggedIn || sessionState == SessionState.LOGIN_REQUIRED
+    }
 
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
@@ -131,12 +168,42 @@ class PortalViewModel : ViewModel() {
     fun onProbeResult(snapshot: PageSnapshot?) {
         _state.update { current ->
             val session = LoginHeuristics.estimate(snapshot, current.hostAllowed)
+            val everLoggedIn = when (session) {
+                SessionState.LOGGED_IN_PROBABLE -> true
+                // ログインフォームが見えたら、明示的にログアウト扱いへ戻す
+                SessionState.LOGIN_REQUIRED -> false
+                SessionState.UNKNOWN -> current.everLoggedIn
+            }
             current.copy(
                 snapshot = snapshot,
                 sessionState = session,
+                everLoggedIn = everLoggedIn,
                 pageTitle = snapshot?.title ?: current.pageTitle,
             )
         }
+    }
+
+    // --- 画面遷移 -----------------------------------------------------------
+
+    fun navigate(screen: AppScreen) {
+        _state.update {
+            it.copy(
+                screen = screen,
+                // 画面を移ったら重なっているパネルは畳む
+                showApi = false,
+                showNetwork = false,
+                showStructure = false,
+            )
+        }
+    }
+
+    /** ネイティブ UI が無い機能を、アプリ内ブラウザとして意図的に開く */
+    fun openPortalView(title: String) {
+        _state.update { it.copy(screen = AppScreen.PORTAL, portalTitle = title) }
+    }
+
+    fun setTimeTableLoading(loading: Boolean) {
+        _state.update { it.copy(timeTableLoading = loading) }
     }
 
     fun onStructureResult(structure: PageStructure?) {
@@ -182,6 +249,7 @@ class PortalViewModel : ViewModel() {
     }
 
     fun onTimeTableResult(table: TimeTable?) {
+        _state.update { it.copy(timeTableLoading = false) }
         _state.update {
             // 時間割ページ以外で実行すると空の結果になる。
             // シラバス取得は cpsmart の画面で行う必要があるため、
@@ -215,6 +283,7 @@ class PortalViewModel : ViewModel() {
                 syllabusDigest = SyllabusDigest(
                     items = items, running = true, doneCount = 0, total = items.size,
                 ),
+                screen = AppScreen.SYLLABUS_LIST,
                 showDigest = true,
                 showTimeTable = false,
                 showApi = false,

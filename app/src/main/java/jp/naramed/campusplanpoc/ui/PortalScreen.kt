@@ -89,9 +89,8 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     // 調査ツールの開閉。既定は閉じる（画面を WebView に譲るため）
     var toolsExpanded by rememberSaveable { mutableStateOf(false) }
-    // ネイティブ・ホームを一時的に畳んで生ポータルを見たいときの状態。
-    // ダッシュボードを離れると自動で戻す（下の LaunchedEffect）。
-    var homeDismissed by rememberSaveable { mutableStateOf(false) }
+    // 時間割の抽出が終わったら、そのままシラバス一覧まで進むかどうか
+    var pendingDigest by remember { mutableStateOf(false) }
 
     /**
      * シラバス取得の入口。ここを通さずに fetcher を直接呼ばないこと。
@@ -110,6 +109,24 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
             probe.installNetObserver(webView) { }
         }
         syllabusFlow.open(webView, kogiCd, "2026") { res -> viewModel.onApiResponse(res) }
+    }
+
+    /**
+     * 履修時間割を開く。
+     *
+     * WebView を時間割ページへ飛ばし、抽出が終わるまでネイティブのローディングを出す。
+     * この間ポータルは見せない（抽出は onPageFinished 側で自動的に走る）。
+     *
+     * @param thenDigest true なら抽出後にそのまま全科目のシラバス取得へ進む
+     */
+    val openTimeTable: (Boolean) -> Unit = { thenDigest ->
+        viewModel.navigate(
+            if (thenDigest) PortalViewModel.AppScreen.SYLLABUS_LIST
+            else PortalViewModel.AppScreen.TIMETABLE
+        )
+        viewModel.setTimeTableLoading(true)
+        pendingDigest = thenDigest
+        webView.loadAllowedUrl(PortalConfig.absoluteUrl("/portal/TimeTable"))
     }
 
     /**
@@ -180,16 +197,84 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
         }
     }
 
-    // 端末の戻るキーは WebView の履歴を優先する
-    BackHandler(enabled = state.canGoBack) {
-        webView.goBack()
+    // 時間割が取れたら、待っていたシラバス一覧の取得を始める
+    LaunchedEffect(state.timeTable, pendingDigest) {
+        val table = state.timeTable
+        if (pendingDigest && table != null && table.entries.isNotEmpty()) {
+            pendingDigest = false
+            runSyllabusDigest(table.distinctCourses)
+        }
+    }
+
+    val screen = state.screen
+    val isLogin = screen == PortalViewModel.AppScreen.LOGIN
+    val isPortalView = screen == PortalViewModel.AppScreen.PORTAL
+
+    /*
+     * 素のポータルを見せてよいのは、この 2 画面だけ。
+     *  - LOGIN : 本人がポータル上でログインする（アプリは資格情報を扱わない）
+     *  - PORTAL: ネイティブ UI が無い機能を「意図して」アプリ内ブラウザで開く
+     * それ以外では下の Box で必ず不透明なネイティブ画面を被せる。
+     */
+    val webVisible = isLogin || isPortalView
+
+    // ログインが必要になったらログイン画面へ寄せ、済んだらホームへ戻す。
+    // needsLogin は遷移中の UNKNOWN では揺れない（everLoggedIn を見ている）。
+    LaunchedEffect(state.needsLogin) {
+        if (state.needsLogin) {
+            viewModel.navigate(PortalViewModel.AppScreen.LOGIN)
+        } else if (viewModel.state.value.screen == PortalViewModel.AppScreen.LOGIN) {
+            viewModel.navigate(PortalViewModel.AppScreen.HOME)
+        }
+    }
+
+    // 戻るキー。重なっているパネル → アプリ内ブラウザの履歴 → ホーム、の順に畳む。
+    val overlayOpen = state.showApi || state.showNetwork || state.showStructure
+    BackHandler(enabled = overlayOpen || isPortalView || screen != PortalViewModel.AppScreen.HOME) {
+        when {
+            state.showApi -> viewModel.setShowApi(false)
+            state.showNetwork -> viewModel.setShowNetwork(false)
+            state.showStructure -> viewModel.setShowStructure(false)
+            isPortalView && state.canGoBack -> webView.goBack()
+            else -> viewModel.navigate(PortalViewModel.AppScreen.HOME)
+        }
+    }
+
+    val screenTitle = when (screen) {
+        PortalViewModel.AppScreen.LOGIN -> "ログイン"
+        PortalViewModel.AppScreen.HOME -> "CampusPlan"
+        PortalViewModel.AppScreen.TIMETABLE -> "履修時間割"
+        PortalViewModel.AppScreen.SYLLABUS_LIST -> "シラバス一覧"
+        PortalViewModel.AppScreen.PORTAL -> state.portalTitle.ifBlank { "ポータル" }
+        PortalViewModel.AppScreen.DEV_TOOLS -> "開発ツール"
     }
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("CampusPlan PoC") },
-                actions = { SessionChip(state.sessionState) },
+                title = {
+                    Text(screenTitle, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                },
+                navigationIcon = {
+                    if (screen != PortalViewModel.AppScreen.HOME && !isLogin) {
+                        TextButton(onClick = {
+                            viewModel.navigate(PortalViewModel.AppScreen.HOME)
+                        }) { Text("戻る") }
+                    }
+                },
+                actions = {
+                    // ログイン状態はホームとログイン画面でだけ出す。
+                    // 各機能の画面では、遷移のたびに「状態不明」が点滅して邪魔になる。
+                    if (screen == PortalViewModel.AppScreen.HOME || isLogin) {
+                        SessionChip(state.sessionState)
+                    }
+                    // 調査ツールは開発用。製品の画面には出さない。
+                    if (BuildConfig.DEBUG && !isLogin) {
+                        TextButton(onClick = {
+                            viewModel.navigate(PortalViewModel.AppScreen.DEV_TOOLS)
+                        }) { Text("開発") }
+                    }
+                },
             )
         }
     ) { innerPadding ->
@@ -198,16 +283,18 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            if (state.isLoading) {
+            // ページ読み込みの進捗は、ポータルを見せている画面でだけ意味がある
+            if (state.isLoading && webVisible) {
                 LinearProgressIndicator(
                     progress = { state.progress / 100f },
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
 
+            if (screen == PortalViewModel.AppScreen.DEV_TOOLS) {
             CompactStatus(state)
+            StatusCard(state)
 
-            // Phase 3: 本来この PoC が目指す「1タップで目的の画面へ」の部分
             ShortcutRow(
                 shortcuts = PortalConfig.SHORTCUTS,
                 onOpen = { shortcut ->
@@ -215,13 +302,6 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
                     webView.loadAllowedUrl(PortalConfig.absoluteUrl(shortcut.path))
                 },
             )
-
-            // 調査用のボタン群は既定で畳んでおく。
-            // 展開したままだと WebView の表示領域がほとんど残らないため。
-            ToolsToggle(expanded = toolsExpanded, onToggle = { toolsExpanded = !toolsExpanded })
-
-            if (toolsExpanded) {
-            StatusCard(state)
 
             FlowRowSingle(
                 label = "時間割を表示（DOMから取得）",
@@ -293,11 +373,8 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
             if (BuildConfig.DEBUG && state.observedExternalHosts.isNotEmpty()) {
                 ObservedHostsSection(state.observedExternalHosts)
             }
-            } // toolsExpanded
-
             EventsSection(state.events, onClear = viewModel::clearEvents)
-
-            HorizontalDivider()
+            } // DEV_TOOLS
 
             Box(
                 modifier = Modifier
@@ -317,45 +394,61 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
                     },
                 )
 
-                // ネイティブ・ホーム。ログイン済みでダッシュボード（/portal/）に
-                // いるとき、生の CampusPlan の代わりにこれを被せる。
-                // WebView はログインと各機能のデータ取得エンジンとして裏で動く。
-                val onDashboard = state.currentPath == "/portal/" || state.currentPath == "/portal"
-                // ダッシュボードを離れたら「畳む」状態をリセットして、戻ったとき再表示する
-                LaunchedEffect(onDashboard) { if (!onDashboard) homeDismissed = false }
-                val showHome = onDashboard &&
-                    state.sessionState == SessionState.LOGGED_IN_PROBABLE &&
-                    !homeDismissed &&
-                    !state.showTimeTable && !state.showApi &&
-                    !state.showNetwork && !state.showStructure
-                if (showHome) {
-                    HomePanel(
-                        shortcuts = PortalConfig.SHORTCUTS,
-                        onOpen = { shortcut ->
-                            webView.loadAllowedUrl(PortalConfig.absoluteUrl(shortcut.path))
-                        },
-                        onShowPortal = { homeDismissed = true },
-                    )
-                }
+                /*
+                 * ここが「素の Web を見せない」ための要。
+                 *
+                 * WebView は常にアタッチしたまま（破棄も付け外しもしない）だが、
+                 * LOGIN / PORTAL 以外では必ず不透明なネイティブ画面で覆う。
+                 * 覆う側を分岐で「出さない」ことが無いよう、else を必ず持たせる。
+                 */
+                if (!webVisible) {
+                    when (screen) {
+                        PortalViewModel.AppScreen.HOME -> HomePanel(
+                            onOpenTimeTable = { openTimeTable(false) },
+                            onOpenSyllabusList = { openTimeTable(true) },
+                            onOpenPortalFeature = { shortcut ->
+                                viewModel.openPortalView(shortcut.label)
+                                webView.loadAllowedUrl(PortalConfig.absoluteUrl(shortcut.path))
+                            },
+                        )
 
-                val timeTable = state.timeTable
-                if (state.showTimeTable && timeTable != null) {
-                    TimeTablePanel(
-                        timeTable = timeTable,
-                        onClose = { viewModel.setShowTimeTable(false) },
-                        onCourseClick = { course ->
-                            openSyllabus(course.kogiCd, course.kogiNm)
-                        },
-                        onDigestAll = { runSyllabusDigest(timeTable.distinctCourses) },
-                    )
-                }
+                        PortalViewModel.AppScreen.TIMETABLE -> {
+                            val timeTable = state.timeTable
+                            if (timeTable != null && timeTable.entries.isNotEmpty()) {
+                                TimeTablePanel(
+                                    timeTable = timeTable,
+                                    onClose = { viewModel.navigate(PortalViewModel.AppScreen.HOME) },
+                                    onCourseClick = { course ->
+                                        openSyllabus(course.kogiCd, course.kogiNm)
+                                    },
+                                    onDigestAll = { runSyllabusDigest(timeTable.distinctCourses) },
+                                )
+                            } else {
+                                LoadingScreen("履修時間割を読み込んでいます…")
+                            }
+                        }
 
-                val digest = state.syllabusDigest
-                if (state.showDigest && digest != null) {
-                    SyllabusDigestPanel(
-                        digest = digest,
-                        onClose = { viewModel.setShowDigest(false) },
-                    )
+                        PortalViewModel.AppScreen.SYLLABUS_LIST -> {
+                            val digest = state.syllabusDigest
+                            if (digest != null) {
+                                SyllabusDigestPanel(
+                                    digest = digest,
+                                    onClose = { viewModel.navigate(PortalViewModel.AppScreen.HOME) },
+                                )
+                            } else {
+                                LoadingScreen("シラバスを集めています…")
+                            }
+                        }
+
+                        // DEV_TOOLS は上の Column 側に出しているので、ここは
+                        // WebView を隠すためだけの下地を敷く
+                        PortalViewModel.AppScreen.DEV_TOOLS ->
+                            Surface(modifier = Modifier.fillMaxSize()) {}
+
+                        // webVisible が true の画面。ここには来ない
+                        PortalViewModel.AppScreen.LOGIN,
+                        PortalViewModel.AppScreen.PORTAL -> Unit
+                    }
                 }
 
                 if (state.showApi) {
@@ -890,63 +983,114 @@ private fun ApiRow(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun HomePanel(
-    shortcuts: List<PortalShortcut>,
-    onOpen: (PortalShortcut) -> Unit,
-    onShowPortal: () -> Unit,
+    onOpenTimeTable: () -> Unit,
+    onOpenSyllabusList: () -> Unit,
+    onOpenPortalFeature: (PortalShortcut) -> Unit,
 ) {
+    // ネイティブ UI を持つ機能と、まだポータルを開くしかない機能を分けて出す。
+    // 後者はタップするとアプリ内ブラウザになることが分かる書き方にしてある。
+    val portalOnly = PortalConfig.SHORTCUTS.filter {
+        it.path != "/portal/TimeTable"
+    }
+
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.surface,
     ) {
-        Column(modifier = Modifier.fillMaxSize()) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 8.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("ホーム", style = MaterialTheme.typography.headlineSmall)
-                TextButton(onClick = onShowPortal) { Text("ポータルを見る") }
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            item {
+                Text("履修", style = MaterialTheme.typography.titleMedium)
+            }
+            item {
+                HomeCard(
+                    title = "履修時間割",
+                    subtitle = "登録している科目を一覧で見る",
+                    onClick = onOpenTimeTable,
+                )
+            }
+            item {
+                HomeCard(
+                    title = "シラバス一覧",
+                    subtitle = "履修科目のシラバスをまとめて取得して読む",
+                    onClick = onOpenSyllabusList,
+                )
             }
 
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(2),
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(16.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                items(shortcuts) { shortcut ->
-                    Card(
-                        onClick = { onOpen(shortcut) },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(110.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.primaryContainer,
-                        ),
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(16.dp),
-                            verticalArrangement = Arrangement.SpaceBetween,
-                        ) {
-                            Text(
-                                shortcut.label,
-                                style = MaterialTheme.typography.titleMedium,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                            )
-                            Text(
-                                "開く",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                            )
-                        }
+            item {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("ポータルで開く", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "アプリ内のブラウザでポータルの画面を表示します。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            items(portalOnly) { shortcut ->
+                Card(
+                    onClick = { onOpenPortalFeature(shortcut) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(shortcut.label, style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "ポータルの画面を開く",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                 }
             }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun HomeCard(title: String, subtitle: String, onClick: () -> Unit) {
+    Card(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer,
+        ),
+    ) {
+        Column(modifier = Modifier.padding(20.dp)) {
+            Text(
+                title,
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+            )
+        }
+    }
+}
+
+/** データ取得中に WebView を隠しておくための、ネイティブのつなぎ画面 */
+@Composable
+private fun LoadingScreen(message: String) {
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.surface,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(32.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(message, style = MaterialTheme.typography.bodyMedium)
         }
     }
 }
@@ -969,24 +1113,16 @@ private fun SyllabusDigestPanel(
         color = MaterialTheme.colorScheme.surface,
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 8.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("シラバス一覧", style = MaterialTheme.typography.titleLarge)
-                    val sub = if (digest.running) {
-                        "取得中… ${digest.doneCount}/${digest.total}"
-                    } else {
-                        "${digest.total} 科目中 ${digest.registeredCount} 件にシラバスあり"
-                    }
-                    Text(sub, style = MaterialTheme.typography.bodySmall)
-                }
-                TextButton(onClick = onClose) { Text("閉じる") }
-            }
+            // 見出しはアプリバーが出しているので、ここは進捗だけ
+            Text(
+                text = if (digest.running) {
+                    "取得中… ${digest.doneCount}/${digest.total}"
+                } else {
+                    "${digest.total} 科目中 ${digest.registeredCount} 件にシラバスあり"
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+            )
 
             if (digest.running) {
                 LinearProgressIndicator(
@@ -1314,25 +1450,12 @@ private fun TimeTablePanel(
         color = MaterialTheme.colorScheme.surface,
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column {
-                    Text(
-                        timeTable.heading.ifBlank { "履修時間割" },
-                        style = MaterialTheme.typography.titleMedium,
-                    )
-                    Text(
-                        "科目 ${timeTable.distinctCourses.size} 件 / コマ ${timeTable.entries.size} 件",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-                TextButton(onClick = onClose) { Text("閉じる") }
-            }
+            // 見出しはアプリバーが出しているので、ここは件数だけ
+            Text(
+                "科目 ${timeTable.distinctCourses.size} 件 / コマ ${timeTable.entries.size} 件",
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+            )
 
             HorizontalDivider()
 
