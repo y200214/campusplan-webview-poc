@@ -76,26 +76,33 @@ CampusPlan で「認証を維持したまま画面遷移を短縮できるか」
 | minSdk | 26 (Android 8.0) |
 | JDK | **17〜21**（22 以降は Gradle 8.9 が非対応） |
 
-### ⚠ 別マシンへ移すときの注意
+### ⚠ JDK について
 
-`gradle.properties` に **macOS 固有の JDK パス** が書いてある。
+Android Studio 2026 の同梱 JDK は **Java 25** で、Gradle 8.9 は非対応。
+そのままだと Gradle Sync が `Could not determine java version` 等で失敗する。
 
-```properties
-org.gradle.java.home=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
-```
+対処は 2 通り。**プロジェクトの `gradle.properties` には書かないこと**（別マシンで壊れる）。
 
-これは「Android Studio 同梱の JDK が Java 25 で、Gradle 8.9 が非対応」という問題を
-回避するためのもの。**Windows / Linux では必ずこの行を書き換えるか削除すること。**
+- Android Studio の
+  `Settings > Build, Execution, Deployment > Build Tools > Gradle > Gradle JDK`
+  で JDK 17〜21 を選ぶ（推奨・簡単）
+- またはユーザー単位の Gradle 設定に書く
+  - macOS / Linux: `~/.gradle/gradle.properties`
+  - Windows: `%USERPROFILE%\.gradle\gradle.properties`
 
-削除する場合は、Android Studio の
-`Settings > Build, Execution, Deployment > Build Tools > Gradle > Gradle JDK`
-で JDK 17〜21 を選ぶ。
+  ```properties
+  org.gradle.java.home=<JDK 17〜21 のパス>
+  ```
+
+Mac mini では後者を採用している（`brew install openjdk@21` で入れた JDK を指定）。
 
 ### 手順
 
 1. Android Studio でこのディレクトリを Open
 2. Gradle Sync（`local.properties` は Studio が自動生成する）
 3. 実機または API 26+ のエミュレータで Run
+
+**Windows で新しく環境を作る場合は [docs/WINDOWS-SETUP.md](docs/WINDOWS-SETUP.md) に手順をまとめてある。**
 
 コマンドラインからビルドする場合:
 
