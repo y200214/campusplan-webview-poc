@@ -63,6 +63,7 @@ import jp.naramed.campusplanpoc.model.NetworkObservation
 import jp.naramed.campusplanpoc.model.PageStructure
 import jp.naramed.campusplanpoc.model.PortalShortcut
 import jp.naramed.campusplanpoc.model.SyllabusDetail
+import jp.naramed.campusplanpoc.model.SyllabusDigest
 import jp.naramed.campusplanpoc.model.SyllabusHtml
 import jp.naramed.campusplanpoc.model.TimeTable
 import jp.naramed.campusplanpoc.model.PortalEvent
@@ -109,6 +110,51 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
             probe.installNetObserver(webView) { }
         }
         syllabusFlow.open(webView, kogiCd, "2026") { res -> viewModel.onApiResponse(res) }
+    }
+
+    /**
+     * 履修時間割の全科目について、シラバスを裏で 1 件ずつ取得して一覧にする。
+     *
+     * トークンは科目ごとに参照画面へ遷移して発行させる必要があるため逐次で進む。
+     * 1 件終わるごとに次を開始し、状態を更新する。当初の目標そのもの。
+     */
+    val runSyllabusDigest: (List<jp.naramed.campusplanpoc.model.TimeTableEntry>) -> Unit = { courses ->
+        // 計装が entryContext を拾う。無効だと必ず「認証コンテキスト未取得」になる。
+        if (!viewModel.state.value.netObserverEnabled) {
+            viewModel.setNetObserverEnabled(true)
+            probe.installNetObserver(webView) { }
+        }
+        viewModel.startSyllabusDigest(courses.map { it.kogiCd to it.kogiNm })
+
+        fun step(index: Int) {
+            if (index >= courses.size) {
+                viewModel.finishSyllabusDigest()
+                return
+            }
+            val course = courses[index]
+            syllabusFlow.open(webView, course.kogiCd, "2026") { res ->
+                val s = res.syllabus
+                val item = when {
+                    s == null || !res.ok -> SyllabusDigest.Item(
+                        course.kogiCd, course.kogiNm, SyllabusDigest.Status.ERROR,
+                    )
+                    s.notRegistered -> SyllabusDigest.Item(
+                        course.kogiCd, course.kogiNm, SyllabusDigest.Status.NOT_REGISTERED,
+                    )
+                    s.bodyFetched && res.body.isNotEmpty() -> SyllabusDigest.Item(
+                        course.kogiCd, course.kogiNm, SyllabusDigest.Status.REGISTERED,
+                        detail = SyllabusHtml.parse(res.body),
+                    )
+                    else -> SyllabusDigest.Item(
+                        course.kogiCd, course.kogiNm, SyllabusDigest.Status.ERROR,
+                    )
+                }
+                viewModel.updateDigestItem(course.kogiCd, item)
+                // 次の科目へ。参照画面の連続遷移が詰まらないよう少し間を置く。
+                webView.postDelayed({ step(index + 1) }, 300L)
+            }
+        }
+        step(0)
     }
 
     // --- ライフサイクル連動 -------------------------------------------------
@@ -300,6 +346,15 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
                         onCourseClick = { course ->
                             openSyllabus(course.kogiCd, course.kogiNm)
                         },
+                        onDigestAll = { runSyllabusDigest(timeTable.distinctCourses) },
+                    )
+                }
+
+                val digest = state.syllabusDigest
+                if (state.showDigest && digest != null) {
+                    SyllabusDigestPanel(
+                        digest = digest,
+                        onClose = { viewModel.setShowDigest(false) },
                     )
                 }
 
@@ -897,6 +952,141 @@ private fun HomePanel(
 }
 
 /**
+ * Phase 5: 時間割の全科目のシラバスをまとめた一覧。
+ *
+ * 「裏で時間割とシラバスを開き、UI では時間割の各科目のシラバスを一覧表示する」
+ * という当初の目標にあたる画面。科目ごとにカードを出し、取得できたものは
+ * 概要をたたんで表示、タップで全文へ展開する。未登録・取得中も 1 行で見せる。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SyllabusDigestPanel(
+    digest: SyllabusDigest,
+    onClose: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.surface,
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("シラバス一覧", style = MaterialTheme.typography.titleLarge)
+                    val sub = if (digest.running) {
+                        "取得中… ${digest.doneCount}/${digest.total}"
+                    } else {
+                        "${digest.total} 科目中 ${digest.registeredCount} 件にシラバスあり"
+                    }
+                    Text(sub, style = MaterialTheme.typography.bodySmall)
+                }
+                TextButton(onClick = onClose) { Text("閉じる") }
+            }
+
+            if (digest.running) {
+                LinearProgressIndicator(
+                    progress = {
+                        if (digest.total == 0) 0f else digest.doneCount.toFloat() / digest.total
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            HorizontalDivider()
+
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                items(digest.items) { item -> SyllabusDigestCard(item) }
+            }
+        }
+    }
+}
+
+/** まとめ一覧の 1 科目。登録ありはタップで全文へ展開する。 */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SyllabusDigestCard(item: SyllabusDigest.Item) {
+    var expanded by remember(item.kogiCd, item.status) { mutableStateOf(false) }
+    val registered = item.status == SyllabusDigest.Status.REGISTERED
+
+    Card(
+        onClick = { if (registered) expanded = !expanded },
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        item.kogiNm.ifBlank { item.kogiCd },
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    Text(
+                        "講義コード ${item.kogiCd}",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                StatusBadge(item.status)
+            }
+
+            if (registered && item.detail != null) {
+                Spacer(modifier = Modifier.height(6.dp))
+                if (!expanded) {
+                    // たたんだ状態では概要を 1 セクションだけ抜粋
+                    val summary = item.detail.sections.firstOrNull {
+                        it.label.contains("概要")
+                    } ?: item.detail.sections.firstOrNull()
+                    if (summary != null) {
+                        Text(
+                            summary.text,
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Text(
+                        "タップで全文",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                } else {
+                    item.detail.sections.forEach { section ->
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            section.label,
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                        Text(section.text, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StatusBadge(status: SyllabusDigest.Status) {
+    val (label, color) = when (status) {
+        SyllabusDigest.Status.PENDING -> "取得中" to MaterialTheme.colorScheme.outline
+        SyllabusDigest.Status.REGISTERED -> "あり" to MaterialTheme.colorScheme.primary
+        SyllabusDigest.Status.NOT_REGISTERED -> "未登録" to MaterialTheme.colorScheme.outline
+        SyllabusDigest.Status.ERROR -> "取得失敗" to MaterialTheme.colorScheme.error
+    }
+    Text(label, style = MaterialTheme.typography.labelMedium, color = color)
+}
+
+/**
  * Phase 5: シラバスの独自 UI。
  *
  * webmvc が返した HTML を [SyllabusHtml] で (ラベル, 本文) に分解し、
@@ -1117,6 +1307,7 @@ private fun TimeTablePanel(
     timeTable: TimeTable,
     onClose: () -> Unit,
     onCourseClick: (jp.naramed.campusplanpoc.model.TimeTableEntry) -> Unit,
+    onDigestAll: () -> Unit,
 ) {
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -1152,6 +1343,16 @@ private fun TimeTablePanel(
                     modifier = Modifier.padding(12.dp),
                 )
                 return@Column
+            }
+
+            // 全科目のシラバスを裏でまとめて取得して一覧にする（当初の目標）
+            Button(
+                onClick = onDigestAll,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+            ) {
+                Text("全科目のシラバスをまとめて取得")
             }
 
             LazyColumn(modifier = Modifier.fillMaxSize()) {

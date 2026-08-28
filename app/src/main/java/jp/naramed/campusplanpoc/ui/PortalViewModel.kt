@@ -8,6 +8,7 @@ import jp.naramed.campusplanpoc.model.NetworkObservation
 import jp.naramed.campusplanpoc.model.PageStructure
 import jp.naramed.campusplanpoc.model.PortalEvent
 import jp.naramed.campusplanpoc.model.SessionState
+import jp.naramed.campusplanpoc.model.SyllabusDigest
 import jp.naramed.campusplanpoc.model.TimeTable
 import jp.naramed.campusplanpoc.security.UrlPolicy
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -51,6 +52,9 @@ class PortalViewModel : ViewModel() {
         /** Phase 5: DOM から取り出した履修時間割 */
         val timeTable: TimeTable? = null,
         val showTimeTable: Boolean = false,
+        /** Phase 5: 時間割の全科目をまとめてシラバス取得した結果 */
+        val syllabusDigest: SyllabusDigest? = null,
+        val showDigest: Boolean = false,
         /**
          * POST ボディ観測の計装を有効にするか。
          * 有効な間は、ページを読み込むたびに自動で入れ直す
@@ -196,6 +200,54 @@ class PortalViewModel : ViewModel() {
 
     fun setShowTimeTable(show: Boolean) {
         _state.update { it.copy(showTimeTable = show) }
+    }
+
+    /**
+     * シラバスまとめの開始。対象科目を PENDING で並べ、パネルを開く。
+     * 以降 1 件ずつ [updateDigestItem] で埋めていく。
+     */
+    fun startSyllabusDigest(courses: List<Pair<String, String>>) {
+        val items = courses.map { (kogiCd, kogiNm) ->
+            SyllabusDigest.Item(kogiCd, kogiNm, SyllabusDigest.Status.PENDING)
+        }
+        _state.update {
+            it.copy(
+                syllabusDigest = SyllabusDigest(
+                    items = items, running = true, doneCount = 0, total = items.size,
+                ),
+                showDigest = true,
+                showTimeTable = false,
+                showApi = false,
+                showNetwork = false,
+                showStructure = false,
+            )
+        }
+    }
+
+    /** まとめの 1 件を確定させ、進捗を進める */
+    fun updateDigestItem(kogiCd: String, item: SyllabusDigest.Item) {
+        _state.update { state ->
+            val digest = state.syllabusDigest ?: return@update state
+            val newItems = digest.items.map { if (it.kogiCd == kogiCd) item else it }
+            state.copy(
+                syllabusDigest = digest.copy(
+                    items = newItems,
+                    doneCount = (digest.doneCount + 1).coerceAtMost(digest.total),
+                ),
+            )
+        }
+    }
+
+    /** まとめ完了。running を下ろす */
+    fun finishSyllabusDigest() {
+        _state.update { state ->
+            val digest = state.syllabusDigest ?: return@update state
+            state.copy(syllabusDigest = digest.copy(running = false))
+        }
+    }
+
+    fun setShowDigest(show: Boolean) {
+        _state.update { it.copy(showDigest = show) }
     }
 
     fun setNetObserverEnabled(enabled: Boolean) {
