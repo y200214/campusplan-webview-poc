@@ -36,7 +36,7 @@ CampusPlan で「認証を維持したまま画面遷移を短縮できるか」
 | 2 | DOM 取得（構造・リンク・form・ハンドラのソース） | ✅ 完了 |
 | 3 | 画面遷移の短縮（href ベースのショートカット） | ✅ 完了 |
 | 4 | API 調査（通信観測・POST ボディ観測） | ✅ 経路確立 |
-| 5 | Compose 専用 UI | 🔄 時間割の科目一覧まで |
+| 5 | Compose 専用 UI | 🔄 時間割の科目一覧 → シラバス本文取得まで |
 
 ### 実機で確認したポータルの構造
 
@@ -50,16 +50,49 @@ CampusPlan で「認証を維持したまま画面遷移を短縮できるか」
   - シラバス参照画面を開かずに呼ぶと `{"message":"{0}の値が不正です。","args":["Token"]}`
     → CSRF 保護が効いている。迂回せず、正規手順で画面を開いてから使う
 - シラバス取得は 2 段階
-  1. `SyllabusSanshoWebApi/initFindAndUpdate` に `kogiCd` / `kaikoNendo` → `{guid, sanshoUrl}`
-  2. `GET /cpsmart/gakusei/wsl/webmvc/SyllabusSansho?TYPE=0&GUID=<guid>` → 本文
+  1. `SyllabusSanshoWebApi/initFindAndUpdate` に `kogiCd` / `kaikoNendo`
+     / `syllabusKomokuPatternId=2` → `{errorMsg, guid, kogiNm, sanshoUrl, isShowPDF, shareKey}`
+  2. `GET /cpsmart/gakusei/wsl/webmvc/SyllabusSansho?TYPE=0&GUID=<guid>` → 本文（text/html）
+  - **`sanshoUrl` は成功時でも `null` で返る。**本文の URL は `guid` から組み立てること。
+    ページ自身も `sanshoUrl` を使っていない
+  - `guid` は呼ぶたびに新しく発行される
+- `entryContext` は通信計装（`net_observer_install.js`）が `window.__pocCtx` に置いている。
+  計装が入っていないとシラバス取得は「認証コンテキスト未取得」で必ず失敗するため、
+  取得の入口（`PortalScreen.openSyllabus`）で計装を自動的に有効化している
 - 時間割の科目リンクは `openwin()` → `window.open("/portal/External/WebClass?kogi=...")`
   → **WebClass (naramed-u.webclass.jp)** へ SSO 遷移。allowlist に追加済み
 
+### 解決済み: `MSG5` の正体（2026-08-28、Windows 機 + Pixel 7a で実測）
+
+「時間割の `G` 系コードで `MSG5` が返る」件は、**講義コードの帯によってシラバスの
+登録有無が分かれている**のが原因だった。実装の不具合でもパラメータ違いでもない。
+
+シラバス検索（`KogiSyllabusKensaku`）で直接引いて確認した結果:
+
+| 講義コード帯 | 例 | シラバス検索 | `initFindAndUpdate` |
+| --- | --- | --- | --- |
+| `G0000xx`（大学院・共通科目） | `G000004` 病理学 | **0 件**「該当データがありませんでした」 | `errorMsg: MSG5` |
+| `G001xxx` / `G002xxx`（大学院・専攻科目） | `G001136` (主)医療教育学講義 | 1 件 | ✅ `guid` → 本文 13140 文字 |
+| `I24xxxx`（学部） | `I243010` 病理学 / Pathology | 1 件 | ✅ `guid` 取得 |
+
+履修時間割の 11 科目（すべて `shuchuKogiList` = 集中講義）の内訳は
+共通科目 6・専攻科目 5 なので、**5 科目はシラバスが引ける**。
+
+`MSG5` は失敗ではなく「シラバス未登録」という状態である。
+`SyllabusResult.notRegistered` として表現し、UI もエラー扱いしない。
+
+なお `G000004 病理学`（大学院・共通科目）と `I243010 病理学`（学部）は
+同名だが別コード・別課程の科目であり、対応づけられるものではない。
+
 ### 未解決
 
-- 時間割の科目（`G` 始まりのコード）で `initFindAndUpdate` を呼ぶと `errorMsg: "MSG5"`
-  （HTTP 200・全フィールド null）。シラバス DB に該当が無い可能性が高い。
-  実在が確認できている `I243010` での切り分けが未実施。
+- 時間割（`G` 系）から学部の科目（`I` 系）への対応づけは**できない**と考えてよいか。
+  同名でも別課程の科目なので、名称一致でつなぐのは誤りになる可能性が高い。
+  シラバスが無い共通科目について、代わりに出せる情報があるか未調査。
+- `/portal/api/KogiJikanwari` の 401。`localStorage` に `accessToken` があることが
+  Phase 2 の構造ダンプで分かったが、これを使った検証は未実施
+  （`hasJQuery=true` / `localStorageKeys=[CpUserId, accessToken]`）。
+- `isShowPDF: true` / `shareKey` から辿れる PDF 出力経路は未調査。
 
 ---
 

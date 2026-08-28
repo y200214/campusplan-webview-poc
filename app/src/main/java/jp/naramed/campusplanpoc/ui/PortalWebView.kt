@@ -14,6 +14,7 @@ import jp.naramed.campusplanpoc.web.PageProbe
 import jp.naramed.campusplanpoc.web.PortalBridge
 import jp.naramed.campusplanpoc.web.PortalWebChromeClient
 import jp.naramed.campusplanpoc.web.PortalWebViewClient
+import jp.naramed.campusplanpoc.web.SyllabusFlow
 import jp.naramed.campusplanpoc.web.WebViewSecurity
 
 private const val TAG = "PortalWebView"
@@ -30,6 +31,7 @@ fun rememberPortalWebView(
     viewModel: PortalViewModel,
     probe: PageProbe,
     bridge: PortalBridge,
+    syllabusFlow: SyllabusFlow,
 ): WebView {
     val context = LocalContext.current
 
@@ -66,6 +68,8 @@ fun rememberPortalWebView(
                     probe.run(webView) { viewModel.onProbeResult(it) }
                     // onPageStarted で入らなかった場合の保険
                     reinstallObserverIfEnabled(webView, viewModel, probe)
+                    // シラバス取得待ちがあれば、参照画面に着いた時点で続きを行う
+                    syllabusFlow.onPageFinished(webView, url)
                 }
 
                 override fun onUrlChanged(url: String?) {

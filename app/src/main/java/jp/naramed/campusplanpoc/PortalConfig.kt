@@ -114,4 +114,37 @@ object PortalConfig {
 
     /** ショートカットの相対パスを絶対 URL にする */
     fun absoluteUrl(path: String): String = "https://campusplanportal.naramed-u.ac.jp$path"
+
+    /**
+     * Phase 5: シラバス参照画面の URL。
+     *
+     * 2026-08-28 に実機で観測した正規導線と同じ形
+     * （シラバス検索の結果から科目を開いたときに、ページ自身が遷移する URL）。
+     *
+     * この画面を必ず経由する理由:
+     *   SystemD Lead の RPC は画面（kinoId）ごとに発行されたトークンを検証する。
+     *   シラバス検索など別画面のコンテキストを流用して SyllabusSanshoWebApi を叩くと
+     *     {"errorMessages":[{"message":"{0}の値が不正です。","args":["Token"]}]}
+     *   が HTTP 400 で返る（2026-08-28 実測）。これは CSRF 保護が正しく効いている状態で、
+     *   迂回してはならない。この画面を開いてトークンを正規に発行させること。
+     *
+     * syllabusKomokuPatternId は実機で 2 が使われていることを確認済み。
+     */
+    fun syllabusSanshoUrl(
+        kogiCd: String,
+        nendo: String,
+        komokuPatternId: String = "2",
+    ): String = absoluteUrl(
+        "/cpsmart/gakusei/dashboard/main/ja/simple/1900/3000230/wsl/SyllabusSansho" +
+            "?kogiCd=${encode(kogiCd)}" +
+            "&kaikoNendo=${encode(nendo)}" +
+            "&syllabusKomokuPatternId=${encode(komokuPatternId)}"
+    )
+
+    /** クエリ値として安全な形にする。講義コードは DOM 由来なので必ず通す。 */
+    private fun encode(value: String): String = java.net.URLEncoder.encode(value, "UTF-8")
+
+    /** シラバス参照画面かどうか。遷移完了の判定に使う。 */
+    fun isSyllabusSanshoUrl(url: String?): Boolean =
+        url != null && url.contains("/wsl/SyllabusSansho", ignoreCase = true)
 }

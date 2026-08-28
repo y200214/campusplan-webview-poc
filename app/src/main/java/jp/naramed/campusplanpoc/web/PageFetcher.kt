@@ -78,6 +78,16 @@ class PageFetcher(private val assets: AssetManager) {
                     "jwt=${t.looksJwt} exp=${t.expEpoch} expired=${t.expired}"
             )
         }
+        // シラバス取得の結末。guid は本文への一時ハンドルなので値そのものは出さない。
+        response.syllabus?.let { s ->
+            Log.d(
+                TAG,
+                "シラバス: kogiCd=${s.kogiCd} 名称=${s.kogiNm.ifEmpty { "-" }} " +
+                    "init=${s.initStatus} guid=${if (s.guid.isEmpty()) "無し" else "取得"} " +
+                    "errorMsg=${s.errorMsg ?: "-"} 未登録=${s.notRegistered} " +
+                    "本文取得=${s.bodyFetched}"
+            )
+        }
         if (response.status >= 400) {
             Log.w(TAG, "エラー応答本文: ${response.body.take(200)}")
         }

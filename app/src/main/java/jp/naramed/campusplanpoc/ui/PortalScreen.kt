@@ -64,6 +64,7 @@ import jp.naramed.campusplanpoc.security.UrlPolicy
 import jp.naramed.campusplanpoc.web.PageFetcher
 import jp.naramed.campusplanpoc.web.PageProbe
 import jp.naramed.campusplanpoc.web.PortalBridge
+import jp.naramed.campusplanpoc.web.SyllabusFlow
 import jp.naramed.campusplanpoc.web.WebViewSecurity
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -74,10 +75,31 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
     val fetcher = remember { PageFetcher(context.assets) }
     // ページ→Kotlin の応答は fetcher が id で突き合わせる
     val bridge = remember { PortalBridge { message -> fetcher.onBridgeMessage(message) } }
-    val webView: WebView = rememberPortalWebView(viewModel, probe, bridge)
+    // シラバスは「参照画面へ遷移してから叩く」。トークンが画面ごとに発行されるため。
+    val syllabusFlow = remember { SyllabusFlow(fetcher) }
+    val webView: WebView = rememberPortalWebView(viewModel, probe, bridge, syllabusFlow)
     val state by viewModel.state.collectAsStateWithLifecycle()
     // 調査ツールの開閉。既定は閉じる（画面を WebView に譲るため）
     var toolsExpanded by rememberSaveable { mutableStateOf(false) }
+
+    /**
+     * シラバス取得の入口。ここを通さずに fetcher を直接呼ばないこと。
+     *
+     * やっていること:
+     *  1. 計装（本文記録）を有効にする。
+     *     リクエストに載せる entryContext は計装が拾って window.__pocCtx に置いている。
+     *     無効なままだと「認証コンテキスト未取得」で必ず失敗する。
+     *  2. シラバス参照画面へ遷移してから API を叩く（トークンが画面ごとに発行されるため）。
+     */
+    val openSyllabus: (String, String) -> Unit = { kogiCd, label ->
+        viewModel.onApiRequestStarted("シラバス $label")
+        if (!viewModel.state.value.netObserverEnabled) {
+            viewModel.setNetObserverEnabled(true)
+            // 遷移後のページには onPageStarted の再導入で入る。ここは現ページ用。
+            probe.installNetObserver(webView) { }
+        }
+        syllabusFlow.open(webView, kogiCd, "2026") { res -> viewModel.onApiResponse(res) }
+    }
 
     // --- ライフサイクル連動 -------------------------------------------------
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -152,16 +174,11 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
                 },
             )
 
-            // 切り分け用: シラバスが実在すると分かっている講義コードで試す。
-            // これが成功すれば「実装は正しく、時間割の科目にシラバスが無い」と確定できる。
+            // 回帰確認用: シラバスが実在する講義コードで一連の流れを通す。
+            // 2026-08-28 実測で guid が返り、本文まで取得できることを確認済み。
             FlowRowSingle(
                 label = "シラバス取得テスト (I243010)",
-                onClick = {
-                    viewModel.onApiRequestStarted("シラバス I243010")
-                    fetcher.fetchSyllabus(webView, "I243010", "2026") { res ->
-                        viewModel.onApiResponse(res)
-                    }
-                },
+                onClick = { openSyllabus("I243010", "I243010") },
             )
 
             NetObserverRow(
@@ -250,10 +267,7 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
                         timeTable = timeTable,
                         onClose = { viewModel.setShowTimeTable(false) },
                         onCourseClick = { course ->
-                            viewModel.onApiRequestStarted("シラバス ${course.kogiNm}")
-                            fetcher.fetchSyllabus(webView, course.kogiCd, "2026") { res ->
-                                viewModel.onApiResponse(res)
-                            }
+                            openSyllabus(course.kogiCd, course.kogiNm)
                         },
                     )
                 }
@@ -787,10 +801,20 @@ private fun ApiPanel(
             ) {
                 Column {
                     Text("API: $label", style = MaterialTheme.typography.titleMedium)
+                    val syllabus = response?.syllabus
                     val summary = when {
                         loading -> "取得中…"
                         response == null -> "-"
                         !response.ok -> "失敗: ${response.error}"
+                        // 未登録は失敗ではない。データが無いだけなので、そう出す。
+                        syllabus != null && syllabus.notRegistered ->
+                            "シラバス未登録（${syllabus.kogiCd} はシラバスが登録されていません）"
+                        syllabus != null && syllabus.bodyFetched ->
+                            "${syllabus.kogiNm.ifEmpty { syllabus.kogiCd }} / 本文 ${response.body.length} 文字" +
+                                (if (response.truncated) "（打ち切りあり）" else "")
+                        syllabus != null && syllabus.guid.isEmpty() ->
+                            "本文まで到達せず（HTTP ${syllabus.initStatus}" +
+                                (syllabus.errorMsg?.let { " / $it" } ?: "") + "）"
                         else -> "HTTP ${response.status} / ${response.contentType} / " +
                             "${response.body.length} 文字" +
                             if (response.truncated) "（打ち切りあり）" else ""
