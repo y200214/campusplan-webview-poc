@@ -204,6 +204,25 @@ class PageProbe(private val assets: AssetManager) {
         Log.d(TAG_STRUCT, "===== STRUCTURE DUMP END =====")
     }
 
+    /**
+     * 開発用: 現在ページの表示テキストを logcat に出す（debug ビルドのみ）。
+     *
+     * 新しい機能（休講・補講など）を独自 UI 化する前に、実際の DOM の中身を
+     * 一度だけ見て抽出ロジックを設計するための足場。読み取り専用で、
+     * release ビルドでは何もしない。個人情報を含みうるので logcat を共有しないこと。
+     */
+    fun dumpText(webView: WebView) {
+        if (!BuildConfig.DEBUG) return
+        val currentUrl = webView.url
+        if (!UrlPolicy.isAllowed(currentUrl)) return
+        // innerText は表示テキストだけを返す。属性やスクリプトは含まない。
+        webView.evaluateJavascript("(function(){return document.body.innerText;})();") { raw ->
+            val text = unwrap(raw).orEmpty()
+            Log.d("PageDump", "url=${UrlPolicy.redactForLog(currentUrl)} len=${text.length}")
+            text.chunked(400).forEachIndexed { i, part -> Log.d("PageDump", "T[$i] $part") }
+        }
+    }
+
     /** allowlist を確認したうえでスクリプトを実行する共通処理 */
     private fun evaluate(webView: WebView, scriptPath: String, onRaw: (String?) -> Unit) {
         val currentUrl = webView.url

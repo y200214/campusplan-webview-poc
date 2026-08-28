@@ -29,6 +29,8 @@ class PortalViewModel : ViewModel() {
     data class UiState(
         /** 表示用 URL。クエリは落としてある（スクリーンショット経由の漏洩を避けるため） */
         val displayUrl: String = "(未読み込み)",
+        /** 現在ページのパスだけ。ネイティブ・ホームを出すかの判定に使う（クエリは含めない） */
+        val currentPath: String = "",
         val pageTitle: String = "",
         val progress: Int = 0,
         val isLoading: Boolean = false,
@@ -65,10 +67,15 @@ class PortalViewModel : ViewModel() {
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
 
+    /** URL からパスだけ取り出す（クエリ・フラグメントは落とす） */
+    private fun pathOf(url: String?): String =
+        url?.let { runCatching { android.net.Uri.parse(it).path.orEmpty() }.getOrDefault("") } ?: ""
+
     fun onPageStarted(url: String?) {
         _state.update {
             it.copy(
                 displayUrl = UrlPolicy.redactForLog(url),
+                currentPath = pathOf(url),
                 hostAllowed = UrlPolicy.isAllowed(url),
                 isLoading = true,
                 progress = 0,
@@ -86,6 +93,7 @@ class PortalViewModel : ViewModel() {
         _state.update {
             it.copy(
                 displayUrl = UrlPolicy.redactForLog(url),
+                currentPath = pathOf(url),
                 hostAllowed = UrlPolicy.isAllowed(url),
                 isLoading = false,
                 progress = 100,
@@ -97,6 +105,7 @@ class PortalViewModel : ViewModel() {
         _state.update {
             it.copy(
                 displayUrl = UrlPolicy.redactForLog(url),
+                currentPath = pathOf(url),
                 hostAllowed = UrlPolicy.isAllowed(url),
             )
         }

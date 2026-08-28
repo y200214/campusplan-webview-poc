@@ -16,6 +16,11 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Card
@@ -83,6 +88,9 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     // 調査ツールの開閉。既定は閉じる（画面を WebView に譲るため）
     var toolsExpanded by rememberSaveable { mutableStateOf(false) }
+    // ネイティブ・ホームを一時的に畳んで生ポータルを見たいときの状態。
+    // ダッシュボードを離れると自動で戻す（下の LaunchedEffect）。
+    var homeDismissed by rememberSaveable { mutableStateOf(false) }
 
     /**
      * シラバス取得の入口。ここを通さずに fetcher を直接呼ばないこと。
@@ -262,6 +270,27 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
                         (view.parent as? android.view.ViewGroup)?.removeView(view)
                     },
                 )
+
+                // ネイティブ・ホーム。ログイン済みでダッシュボード（/portal/）に
+                // いるとき、生の CampusPlan の代わりにこれを被せる。
+                // WebView はログインと各機能のデータ取得エンジンとして裏で動く。
+                val onDashboard = state.currentPath == "/portal/" || state.currentPath == "/portal"
+                // ダッシュボードを離れたら「畳む」状態をリセットして、戻ったとき再表示する
+                LaunchedEffect(onDashboard) { if (!onDashboard) homeDismissed = false }
+                val showHome = onDashboard &&
+                    state.sessionState == SessionState.LOGGED_IN_PROBABLE &&
+                    !homeDismissed &&
+                    !state.showTimeTable && !state.showApi &&
+                    !state.showNetwork && !state.showStructure
+                if (showHome) {
+                    HomePanel(
+                        shortcuts = PortalConfig.SHORTCUTS,
+                        onOpen = { shortcut ->
+                            webView.loadAllowedUrl(PortalConfig.absoluteUrl(shortcut.path))
+                        },
+                        onShowPortal = { homeDismissed = true },
+                    )
+                }
 
                 val timeTable = state.timeTable
                 if (state.showTimeTable && timeTable != null) {
@@ -790,6 +819,80 @@ private fun ApiRow(
             OutlinedButton(onClick = { onCall(e) }) { Text("API: ${e.label}") }
         }
         OutlinedButton(onClick = onCompare) { Text("401原因の比較テスト") }
+    }
+}
+
+/**
+ * Phase 5: ネイティブ・ホーム。
+ *
+ * ログイン済みでダッシュボードにいるとき、生の CampusPlan の代わりに被せる
+ * アプリの入口。各機能へは 1 タップで飛び、遷移先ではそれぞれの独自 UI
+ * （時間割一覧・シラバス）が出る。
+ *
+ * WebView を消しているわけではない。裏でログインとデータ取得を担い続ける。
+ * 「そのままポータルを見る」で一時的に生画面へ退避できる。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun HomePanel(
+    shortcuts: List<PortalShortcut>,
+    onOpen: (PortalShortcut) -> Unit,
+    onShowPortal: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.surface,
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("ホーム", style = MaterialTheme.typography.headlineSmall)
+                TextButton(onClick = onShowPortal) { Text("ポータルを見る") }
+            }
+
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(2),
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(16.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                items(shortcuts) { shortcut ->
+                    Card(
+                        onClick = { onOpen(shortcut) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(110.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.primaryContainer,
+                        ),
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(16.dp),
+                            verticalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Text(
+                                shortcut.label,
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            )
+                            Text(
+                                "開く",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
