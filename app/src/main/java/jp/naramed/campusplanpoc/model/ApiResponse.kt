@@ -52,6 +52,14 @@ data class SyllabusResult(
      * 失敗として扱わず、UI では「シラバス未登録」と出すこと。
      */
     val notRegistered: Boolean = false,
+    /**
+     * トークンが不正として弾かれた（HTTP 400）。
+     *
+     * 参照画面のトークンを他の講義コードへ使い回したときに、これが立つかどうかで
+     * 「トークンは画面に紐づくのか、講義コードにも紐づくのか」が判別できる。
+     * 呼び出し側はこれを見て、参照画面へ遷移し直してから再試行する。
+     */
+    val tokenRejected: Boolean = false,
     /** ステージ 1 の HTTP ステータス */
     val initStatus: Int = 0,
     /** ステージ 2 まで到達して本文を取得できたか */

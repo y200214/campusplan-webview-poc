@@ -79,6 +79,30 @@ class SyllabusFlow(private val fetcher: PageFetcher) {
         fetcher.fetchSyllabus(webView, waiting.kogiCd, waiting.nendo, waiting.onResult)
     }
 
+    /**
+     * 遷移せず、いま表示している参照画面のトークンでそのまま取得する。
+     *
+     * トークンは画面（kinoId=3000230）に対して発行される。講義コードごとに
+     * 発行し直す必要が無ければ、参照画面に一度入ったあとは何科目でも
+     * ここから叩ける。全科目をまとめて取るときの主経路。
+     *
+     * 使い回しが通らなかった場合は応答の [ApiResponse.syllabus] の
+     * tokenRejected が立つので、呼び出し側で [open] に切り替えて再試行すること。
+     *
+     * @return 参照画面に居なかった場合は false（呼び出し側は [open] を使う）
+     */
+    fun fetchHere(
+        webView: WebView,
+        kogiCd: String,
+        nendo: String,
+        onResult: (ApiResponse) -> Unit,
+    ): Boolean {
+        if (!PortalConfig.isSyllabusSanshoUrl(webView.url)) return false
+        Log.d(TAG, "遷移せず取得（トークン使い回し）: kogiCd=$kogiCd")
+        fetcher.fetchSyllabus(webView, kogiCd, nendo, onResult)
+        return true
+    }
+
     /** 待機中の要求を破棄する（セッション破棄時など） */
     fun cancel() {
         pending = null

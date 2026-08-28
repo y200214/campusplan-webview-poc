@@ -1,5 +1,6 @@
 package jp.naramed.campusplanpoc.ui
 
+import android.util.Log
 import android.webkit.WebView
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
@@ -143,32 +144,71 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
         }
         viewModel.startSyllabusDigest(courses.map { it.kogiCd to it.kogiNm })
 
+        val nendo = "2026"
+
+        fun toItem(course: jp.naramed.campusplanpoc.model.TimeTableEntry, res: ApiResponse):
+            SyllabusDigest.Item {
+            val s = res.syllabus
+            return when {
+                s == null || !res.ok -> SyllabusDigest.Item(
+                    course.kogiCd, course.kogiNm, SyllabusDigest.Status.ERROR,
+                )
+                s.notRegistered -> SyllabusDigest.Item(
+                    course.kogiCd, course.kogiNm, SyllabusDigest.Status.NOT_REGISTERED,
+                )
+                s.bodyFetched && res.body.isNotEmpty() -> SyllabusDigest.Item(
+                    course.kogiCd, course.kogiNm, SyllabusDigest.Status.REGISTERED,
+                    detail = SyllabusHtml.parse(res.body),
+                )
+                else -> SyllabusDigest.Item(
+                    course.kogiCd, course.kogiNm, SyllabusDigest.Status.ERROR,
+                )
+            }
+        }
+
         fun step(index: Int) {
             if (index >= courses.size) {
                 viewModel.finishSyllabusDigest()
                 return
             }
             val course = courses[index]
-            syllabusFlow.open(webView, course.kogiCd, "2026") { res ->
-                val s = res.syllabus
-                val item = when {
-                    s == null || !res.ok -> SyllabusDigest.Item(
-                        course.kogiCd, course.kogiNm, SyllabusDigest.Status.ERROR,
-                    )
-                    s.notRegistered -> SyllabusDigest.Item(
-                        course.kogiCd, course.kogiNm, SyllabusDigest.Status.NOT_REGISTERED,
-                    )
-                    s.bodyFetched && res.body.isNotEmpty() -> SyllabusDigest.Item(
-                        course.kogiCd, course.kogiNm, SyllabusDigest.Status.REGISTERED,
-                        detail = SyllabusHtml.parse(res.body),
-                    )
-                    else -> SyllabusDigest.Item(
-                        course.kogiCd, course.kogiNm, SyllabusDigest.Status.ERROR,
-                    )
-                }
+
+            // 1. キャッシュにあれば通信しない
+            val cached = viewModel.cachedSyllabus(course.kogiCd, nendo)
+            if (cached != null) {
+                viewModel.updateDigestItem(course.kogiCd, cached)
+                webView.post { step(index + 1) }
+                return
+            }
+
+            fun finish(res: ApiResponse) {
+                val item = toItem(course, res)
+                viewModel.cacheSyllabus(course.kogiCd, nendo, item)
                 viewModel.updateDigestItem(course.kogiCd, item)
-                // 次の科目へ。参照画面の連続遷移が詰まらないよう少し間を置く。
-                webView.postDelayed({ step(index + 1) }, 300L)
+                step(index + 1)
+            }
+
+            /*
+             * 2. トークンの使い回し。
+             *
+             * トークンは画面（kinoId=3000230）に対して発行される。参照画面に一度
+             * 入っていれば、講義コードを変えてもそのまま叩けるはず、という読み。
+             * 通れば 1 科目ごとのページ遷移（実測 約400ms）が丸ごと消える。
+             *
+             * 読みが外れた場合は tokenRejected が立つので、その科目だけ
+             * 従来どおり遷移してから取り直す。壊れずに degrade する。
+             */
+            val reused = syllabusFlow.fetchHere(webView, course.kogiCd, nendo) { res ->
+                if (res.syllabus?.tokenRejected == true) {
+                    Log.d("SyllabusDigest", "トークン使い回し不可。遷移して再試行: ${course.kogiCd}")
+                    syllabusFlow.open(webView, course.kogiCd, nendo) { retry -> finish(retry) }
+                } else {
+                    finish(res)
+                }
+            }
+            // 3. まだ参照画面に居ない（初回など）は遷移する
+            if (!reused) {
+                syllabusFlow.open(webView, course.kogiCd, nendo) { res -> finish(res) }
             }
         }
         step(0)

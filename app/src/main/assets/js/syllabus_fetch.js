@@ -115,6 +115,7 @@
             guid: "",
             errorMsg: null,
             notRegistered: false,
+            tokenRejected: false,
             initStatus: 0,
             bodyFetched: false
         };
@@ -125,7 +126,24 @@
             meta.errorMsg = (o && o.errorMsg) ? String(o.errorMsg) : null;
             // MSG5 = そのコードのシラバスが登録されていない（通信もトークンも正常）
             meta.notRegistered = meta.errorMsg === "MSG5";
-        } catch (e) { /* JSON でない（Token エラー等）ときは guid 無しのまま */ }
+
+            /*
+             * トークンが弾かれた形:
+             *   {"isDomainException":true,
+             *    "errorMessages":[{"message":"{0}の値が不正です。","args":["Token"]}]}
+             * 呼び出し側はこれを見て、参照画面へ遷移し直してから再試行する。
+             */
+            var msgs = o && o.errorMessages;
+            if (msgs && msgs.length) {
+                for (var i = 0; i < msgs.length; i++) {
+                    var args = msgs[i] && msgs[i].args;
+                    if (args && args.indexOf && args.indexOf("Token") >= 0) {
+                        meta.tokenRejected = true;
+                        break;
+                    }
+                }
+            }
+        } catch (e) { /* JSON でない（想定外）ときは guid 無しのまま */ }
         return meta;
     }
 

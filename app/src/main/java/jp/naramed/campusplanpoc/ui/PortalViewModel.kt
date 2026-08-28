@@ -105,6 +105,29 @@ class PortalViewModel : ViewModel() {
             get() = !everLoggedIn || sessionState == SessionState.LOGIN_REQUIRED
     }
 
+    /**
+     * 取得済みシラバスのキャッシュ。キーは 講義コード + 開講年度。
+     *
+     * **メモリ上だけに置く。ディスクへは書かない。**
+     * このアプリはダウンロードを一律ブロックしている（端末にポータルの資料が
+     * 残るのは管理外のデータ持ち出しになりうるため）。同じ理由でシラバス本文も
+     * 永続化しない。プロセスが終われば消えるし、セッション破棄でも消す。
+     *
+     * 効果としては「同じ起動中に開き直したら即座に出る」まで。
+     */
+    private val syllabusCache = mutableMapOf<String, SyllabusDigest.Item>()
+
+    fun cachedSyllabus(kogiCd: String, nendo: String): SyllabusDigest.Item? =
+        syllabusCache["$kogiCd@$nendo"]
+
+    fun cacheSyllabus(kogiCd: String, nendo: String, item: SyllabusDigest.Item) {
+        // 失敗は次回やり直したいのでキャッシュしない
+        if (item.status == SyllabusDigest.Status.ERROR ||
+            item.status == SyllabusDigest.Status.PENDING
+        ) return
+        syllabusCache["$kogiCd@$nendo"] = item
+    }
+
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
 
@@ -337,6 +360,8 @@ class PortalViewModel : ViewModel() {
     }
 
     fun onLocalSessionCleared() {
+        // セッションを捨てたらキャッシュも捨てる（別人が使う可能性があるため）
+        syllabusCache.clear()
         _state.update {
             UiState(
                 observedExternalHosts = it.observedExternalHosts,
