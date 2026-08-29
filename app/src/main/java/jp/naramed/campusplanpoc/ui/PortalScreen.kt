@@ -45,6 +45,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.rememberSwipeToDismissBoxState
@@ -70,6 +71,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import jp.naramed.campusplanpoc.auth.AdminLock
+import jp.naramed.campusplanpoc.auth.AppSettings
 import jp.naramed.campusplanpoc.auth.CredentialStore
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -1956,9 +1958,20 @@ private fun StudentCardPanel(
                         }
                     }
 
-                    // --- 管理者PIN の設定 ---
+                    // --- 端末の設定 ---
                     item {
                         Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            "この端末の設定",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(start = 4.dp, bottom = 2.dp),
+                        )
+                    }
+                    item {
+                        AutoLogoutSection(onRequireAdmin = { action -> requireAdmin(action) })
+                    }
+                    item {
                         AdminPinSection(
                             enabled = pinEnabled,
                             onChanged = { message = it },
@@ -1966,6 +1979,58 @@ private fun StudentCardPanel(
                     }
                 }
             }
+        }
+    }
+}
+
+/**
+ * 「アプリを閉じたらログアウト」の設定。
+ *
+ * 実体は起動時に前回の Cookie を捨てること。終了時に消す方式は
+ * プロセスを強制終了されると走らないので採らない。
+ *
+ * 既定は有効。共用端末で前の人のセッションが残っているほうが危ないため。
+ * 切り替えは管理者操作として扱う（PIN 設定時は PIN が要る）。
+ */
+@Composable
+private fun AutoLogoutSection(
+    onRequireAdmin: (() -> Unit) -> Unit,
+) {
+    val context = LocalContext.current
+    var enabled by remember { mutableStateOf(AppSettings.autoLogoutOnLaunch(context)) }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.medium,
+        colors = listCardColors(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        border = listCardBorder(),
+    ) {
+        Row(
+            modifier = Modifier.padding(start = 16.dp, end = 12.dp, top = 14.dp, bottom = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("閉じたらログアウト", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    if (enabled) {
+                        "アプリを開き直すとログインからやり直します"
+                    } else {
+                        "次に開いてもログインしたままになります"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(
+                checked = enabled,
+                onCheckedChange = { next ->
+                    onRequireAdmin {
+                        AppSettings.setAutoLogoutOnLaunch(context, next)
+                        enabled = next
+                    }
+                },
+            )
         }
     }
 }

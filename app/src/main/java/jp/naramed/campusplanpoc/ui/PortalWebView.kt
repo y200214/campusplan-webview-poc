@@ -7,6 +7,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import jp.naramed.campusplanpoc.PortalConfig
+import jp.naramed.campusplanpoc.auth.AppSettings
 import jp.naramed.campusplanpoc.model.NetworkObservation
 import jp.naramed.campusplanpoc.model.PortalEvent
 import jp.naramed.campusplanpoc.security.UrlPolicy
@@ -44,6 +45,21 @@ fun rememberPortalWebView(
 
         // セキュリティ設定は WebView 生成直後、最初のロードより前に必ず適用する
         WebViewSecurity.harden(webView)
+
+        /*
+         * 「アプリを閉じたらログアウト」の実体。
+         *
+         * 起動のたびに前回の Cookie を捨てるので、利用者から見れば
+         * アプリを閉じた時点でログアウトされている状態になる。
+         * 終了時に消す方式にしないのは、プロセスを強制終了されると走らないため。
+         *
+         * ここは Activity の生成時に一度だけ通る。アプリを切り替えて戻っただけ
+         * （プロセスが生きている）なら通らないので、ログインは維持される。
+         */
+        if (AppSettings.autoLogoutOnLaunch(context)) {
+            WebViewSecurity.clearSessionCookies()
+            Log.d(TAG, "起動時の自動ログアウト: 前回のセッションを破棄した")
+        }
 
         // ページ→Kotlin の一方向チャネル。CampusPlan のオリジンにだけ注入される。
         val bridgeAttached = bridge.attach(webView)

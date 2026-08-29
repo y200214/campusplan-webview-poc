@@ -92,6 +92,20 @@ object WebViewSecurity {
     }
 
     /**
+     * Cookie だけを消す。キャッシュや履歴は触らない。
+     *
+     * アプリ起動時の自動ログアウトに使う。起動のたびに前回のセッションを捨てれば、
+     * 利用者から見て「アプリを閉じたらログアウトされている」状態になる。
+     *
+     * 終了時に消す作りにしないのは、プロセスを強制終了された場合に処理が走る保証が
+     * ないため。確実に走る起動時に消すほうが取りこぼしがない。
+     */
+    fun clearSessionCookies() {
+        CookieManager.getInstance().removeAllCookies(null)
+        CookieManager.getInstance().flush()
+    }
+
+    /**
      * 明示ログアウト用。Cookie とキャッシュを消す。
      *
      * 注意: これはアプリ側の後始末にすぎず、サーバー側のセッションは無効化されない。
