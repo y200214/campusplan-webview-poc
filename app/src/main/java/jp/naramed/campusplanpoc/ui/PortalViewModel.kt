@@ -9,6 +9,7 @@ import jp.naramed.campusplanpoc.model.PageStructure
 import jp.naramed.campusplanpoc.model.PortalEvent
 import jp.naramed.campusplanpoc.model.SessionState
 import jp.naramed.campusplanpoc.model.SearchUiState
+import jp.naramed.campusplanpoc.auth.CredentialStore
 import jp.naramed.campusplanpoc.nfc.FelicaReader
 import jp.naramed.campusplanpoc.model.SyllabusDigest
 import jp.naramed.campusplanpoc.model.SyllabusSearchResult
@@ -117,8 +118,8 @@ class PortalViewModel : ViewModel() {
         val search: SearchUiState = SearchUiState(),
         /** Phase 6: 学生証の読み取り結果。画面を出ている間だけ持つ */
         val cardRead: FelicaReader.Result? = null,
-        /** カード連携の登録済み IDm（未登録なら null） */
-        val registeredIdm: String? = null,
+        /** カード連携の登録一覧。1 台に複数枚を登録できる */
+        val cardEntries: List<CredentialStore.Entry> = emptyList(),
         /** カードタッチによる自動ログインの進行状況 */
         val loginState: LoginState = LoginState.Idle,
     ) {
@@ -257,12 +258,27 @@ class PortalViewModel : ViewModel() {
         _state.update { it.copy(cardRead = result) }
     }
 
-    fun setRegisteredIdm(idm: String?) {
-        _state.update { it.copy(registeredIdm = idm) }
+    fun setCardEntries(entries: List<CredentialStore.Entry>) {
+        _state.update { it.copy(cardEntries = entries) }
     }
 
     fun setLoginState(next: LoginState) {
         _state.update { it.copy(loginState = next) }
+    }
+
+    /**
+     * ログインの送信を始める。
+     *
+     * ここで sessionState を UNKNOWN に戻すのが要点。
+     * 送信する時点では画面がまだログインページなので sessionState は LOGIN_REQUIRED。
+     * それを残したまま結果判定を始めると、送信直後に「ID かパスワードが違う」と
+     * 誤判定してしまう（実機で発生）。判定材料を一度捨てて、
+     * 送信後の新しいプローブ結果だけで判断させる。
+     */
+    fun beginLogin() {
+        _state.update {
+            it.copy(loginState = LoginState.InProgress, sessionState = SessionState.UNKNOWN)
+        }
     }
 
     fun clearCardRead() {

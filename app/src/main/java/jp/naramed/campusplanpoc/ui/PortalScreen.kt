@@ -31,6 +31,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Card
@@ -77,6 +78,7 @@ import jp.naramed.campusplanpoc.model.ApiResponse
 import jp.naramed.campusplanpoc.model.NetworkObservation
 import jp.naramed.campusplanpoc.model.PageStructure
 import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import jp.naramed.campusplanpoc.nfc.FelicaReader
 import jp.naramed.campusplanpoc.nfc.NfcAvailability
@@ -114,6 +116,8 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
     var toolsExpanded by rememberSaveable { mutableStateOf(false) }
     // 時間割の抽出が終わったら、そのままシラバス一覧まで進むかどうか
     var pendingDigest by remember { mutableStateOf(false) }
+    // ログアウトの確認ダイアログ
+    var showLogoutConfirm by remember { mutableStateOf(false) }
 
     /**
      * シラバス取得の入口。ここを通さずに fetcher を直接呼ばないこと。
@@ -304,9 +308,9 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
         }
     }
 
-    // 登録済み IDm を一度だけ読み込む
+    // 登録一覧を読み込む
     LaunchedEffect(Unit) {
-        viewModel.setRegisteredIdm(CredentialStore.registeredIdm(context))
+        viewModel.setCardEntries(CredentialStore.entries(context))
     }
 
     /*
@@ -328,6 +332,17 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
         }
     }
 
+    // 応答が返らないまま止まり続けないよう、頭打ちを設ける
+    LaunchedEffect(state.loginState) {
+        if (state.loginState !is LoginState.InProgress) return@LaunchedEffect
+        delay(25_000)
+        if (viewModel.state.value.loginState is LoginState.InProgress) {
+            viewModel.setLoginState(
+                LoginState.Failed("応答がありませんでした。通信状況を確認してもう一度お試しください")
+            )
+        }
+    }
+
     /**
      * カードタッチによる自動ログイン。
      *
@@ -336,17 +351,16 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
      * 裏で通っているのは正規のログイン経路そのもの。
      */
     val loginWithCard: (String) -> Unit = { idm ->
-        val registered = CredentialStore.registeredIdm(context)
-        if (registered == null || !registered.equals(idm, ignoreCase = true)) {
+        if (!CredentialStore.isRegistered(context, idm)) {
             viewModel.setLoginState(LoginState.Mismatch)
         } else {
-            val credential = CredentialStore.load(context)
+            val credential = CredentialStore.load(context, idm)
             if (credential == null) {
                 viewModel.setLoginState(
                     LoginState.Failed("保存された情報を読み出せませんでした。登録し直してください")
                 )
             } else {
-                viewModel.setLoginState(LoginState.InProgress)
+                viewModel.beginLogin()
                 fetcher.submitLogin(webView, credential.loginId, credential.password) { ok, error ->
                     if (!ok) {
                         viewModel.setLoginState(
@@ -357,6 +371,26 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
                 }
             }
         }
+    }
+
+    /**
+     * ログアウト。
+     *
+     * Cookie を消してポータルのセッションを切り、ログイン画面へ戻す。
+     * 取得済みのシラバスや時間割も一緒に捨てる（次の利用者に見せないため）。
+     *
+     * 学生証の連携（保存した ID とパスワード）は**消さない**。
+     * 「今のセッションを終える」ことと「この端末での連携をやめる」ことは別の意思なので、
+     * 後者は学生証画面の「連携を解除する」で明示的に行わせる。
+     */
+    val logout: () -> Unit = {
+        syllabusFlow.cancel()
+        WebViewSecurity.clearLocalSession(webView)
+        viewModel.onLocalSessionCleared()
+        viewModel.setLoginState(LoginState.Idle)
+        viewModel.setCardEntries(CredentialStore.entries(context))
+        viewModel.navigate(PortalViewModel.AppScreen.LOGIN)
+        webView.loadAllowedUrl(PortalConfig.START_URL)
     }
 
     val screen = state.screen
@@ -437,6 +471,10 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
                     }
                 },
                 actions = {
+                    // ログアウトはホームからだけ。誤タップを避けるため確認を挟む
+                    if (screen == PortalViewModel.AppScreen.HOME) {
+                        TextButton(onClick = { showLogoutConfirm = true }) { Text("ログアウト") }
+                    }
                     // 学生証の読み取りはログイン不要なので、ログイン画面からも入れる
                     if (isLogin) {
                         TextButton(onClick = {
@@ -460,6 +498,32 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
             }
         }
     ) { innerPadding ->
+        if (showLogoutConfirm) {
+            AlertDialog(
+                onDismissRequest = { showLogoutConfirm = false },
+                title = { Text("ログアウトしますか") },
+                text = {
+                    Text(
+                        if (state.cardEntries.isNotEmpty()) {
+                            "ポータルのセッションを終了します。" +
+                                "学生証の連携は残るので、次もかざすだけでログインできます。"
+                        } else {
+                            "ポータルのセッションを終了します。"
+                        }
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        showLogoutConfirm = false
+                        logout()
+                    }) { Text("ログアウト") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showLogoutConfirm = false }) { Text("キャンセル") }
+                },
+            )
+        }
+
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -577,7 +641,7 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
                 )
 
                 // ログイン画面ではカードのタッチを待ち受ける
-                if (isLogin && state.registeredIdm != null) {
+                if (isLogin && state.cardEntries.isNotEmpty()) {
                     val cardScope = rememberCoroutineScope()
                     NfcReaderEffect(enabled = true) { read ->
                         cardScope.launch { loginWithCard(read.idm) }
@@ -624,20 +688,22 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
 
                         PortalViewModel.AppScreen.STUDENT_CARD -> StudentCardPanel(
                             result = state.cardRead,
-                            registeredIdm = state.registeredIdm,
+                            entries = state.cardEntries,
                             onRead = viewModel::onCardRead,
                             onClear = viewModel::clearCardRead,
-                            onRegister = { idm, loginId, password ->
+                            onRegister = { idm, label, loginId, password ->
                                 val saved = CredentialStore.save(
-                                    context, idm,
+                                    context, idm, label,
                                     CredentialStore.Credential(loginId, password),
                                 )
-                                if (saved) viewModel.setRegisteredIdm(idm)
+                                if (saved) {
+                                    viewModel.setCardEntries(CredentialStore.entries(context))
+                                }
                                 saved
                             },
-                            onUnregister = {
-                                CredentialStore.clear(context)
-                                viewModel.setRegisteredIdm(null)
+                            onRemove = { idm ->
+                                CredentialStore.remove(context, idm)
+                                viewModel.setCardEntries(CredentialStore.entries(context))
                             },
                         )
 
@@ -668,9 +734,9 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
 
                         PortalViewModel.AppScreen.LOGIN -> LoginPanel(
                             state = state.loginState,
-                            cardRegistered = state.registeredIdm != null,
+                            cardRegistered = state.cardEntries.isNotEmpty(),
                             onSubmit = { loginId, password ->
-                                viewModel.setLoginState(LoginState.InProgress)
+                                viewModel.beginLogin()
                                 fetcher.submitLogin(webView, loginId, password) { ok, error ->
                                     if (!ok) {
                                         viewModel.setLoginState(
@@ -1519,9 +1585,11 @@ private fun listCardColors() = CardDefaults.cardColors(
 @Composable
 private fun listCardBorder() = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
 
-
 /**
  * Phase 6: 学生証（FeliCa）の読み取りと、カード連携の登録。
+ *
+ * 1 台に複数枚を登録できる。共用端末で複数人が使う想定があるため、
+ * カードごとに 1 件持ち、タッチされた IDm で引く。
  *
  * リーダーモードが有効なのはこの画面を開いている間だけ。
  * 読み取った IDm は、登録するまではどこにも保存されない。
@@ -1529,11 +1597,11 @@ private fun listCardBorder() = BorderStroke(1.dp, MaterialTheme.colorScheme.outl
 @Composable
 private fun StudentCardPanel(
     result: FelicaReader.Result?,
-    registeredIdm: String?,
+    entries: List<CredentialStore.Entry>,
     onRead: (FelicaReader.Result) -> Unit,
     onClear: () -> Unit,
-    onRegister: (idm: String, loginId: String, password: String) -> Boolean,
-    onUnregister: () -> Unit,
+    onRegister: (idm: String, label: String, loginId: String, password: String) -> Boolean,
+    onRemove: (idm: String) -> Unit,
 ) {
     val context = LocalContext.current
     val availability = remember(context) { nfcAvailability(context as? android.app.Activity) }
@@ -1544,9 +1612,34 @@ private fun StudentCardPanel(
         scope.launch { onRead(read) }
     }
 
+    var label by rememberSaveable { mutableStateOf("") }
     var loginId by rememberSaveable { mutableStateOf("") }
     var password by rememberSaveable { mutableStateOf("") }
     var message by remember { mutableStateOf<String?>(null) }
+    var removeTarget by remember { mutableStateOf<CredentialStore.Entry?>(null) }
+
+    removeTarget?.let { target ->
+        AlertDialog(
+            onDismissRequest = { removeTarget = null },
+            title = { Text("この登録を削除しますか") },
+            text = {
+                Text(
+                    "「${target.label.ifBlank { target.loginId.ifBlank { target.idm } }}」の" +
+                        "ログイン情報を、この端末から削除します。"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    onRemove(target.idm)
+                    removeTarget = null
+                    message = "削除しました"
+                }) { Text("削除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { removeTarget = null }) { Text("キャンセル") }
+            },
+        )
+    }
 
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -1574,61 +1667,14 @@ private fun StudentCardPanel(
                 }
 
                 NfcAvailability.AVAILABLE -> {
-                    if (registeredIdm != null) {
+                    // --- 新しいカードの登録 ---
+                    if (result == null) {
                         item {
-                            Card(
+                            Surface(
                                 modifier = Modifier.fillMaxWidth(),
                                 shape = MaterialTheme.shapes.large,
-                                colors = CardDefaults.cardColors(
-                                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                                ),
-                                elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
-                            ) {
-                                Column(modifier = Modifier.padding(20.dp)) {
-                                    Text(
-                                        "カード連携ずみ",
-                                        style = MaterialTheme.typography.titleLarge,
-                                    )
-                                    Spacer(modifier = Modifier.height(6.dp))
-                                    Text(
-                                        "ログイン画面で学生証をかざすと、自動でログインします。",
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = MaterialTheme.colorScheme.onPrimaryContainer
-                                            .copy(alpha = 0.78f),
-                                    )
-                                }
-                            }
-                        }
-                        item { CardField("登録済みカード (IDm)", registeredIdm) }
-                        item {
-                            OutlinedButton(
-                                onClick = {
-                                    onUnregister()
-                                    loginId = ""
-                                    password = ""
-                                    message = "連携を解除しました"
-                                },
-                                modifier = Modifier.fillMaxWidth(),
-                            ) { Text("連携を解除する") }
-                        }
-                        item {
-                            Text(
-                                "解除すると、保存されている ID とパスワードは端末から削除されます。",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    } else if (result == null) {
-                        item {
-                            Card(
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = MaterialTheme.shapes.large,
-                                colors = CardDefaults.cardColors(
-                                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                                ),
-                                elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+                                color = MaterialTheme.colorScheme.primaryContainer,
+                                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
                             ) {
                                 Column(modifier = Modifier.padding(24.dp)) {
                                     Text(
@@ -1637,7 +1683,7 @@ private fun StudentCardPanel(
                                     )
                                     Spacer(modifier = Modifier.height(6.dp))
                                     Text(
-                                        "端末の背面中央あたりにカードを当てます。",
+                                        "端末の背面中央あたりにカードを当てると、登録できます。",
                                         style = MaterialTheme.typography.bodyMedium,
                                         color = MaterialTheme.colorScheme.onPrimaryContainer
                                             .copy(alpha = 0.78f),
@@ -1646,14 +1692,25 @@ private fun StudentCardPanel(
                             }
                         }
                     } else {
+                        val already = entries.any { it.idm.equals(result.idm, ignoreCase = true) }
                         item { CardField("カード識別子 (IDm)", result.idm) }
-                        if (result.systemCode.isNotBlank()) {
-                            item { CardField("システムコード", result.systemCode) }
-                        }
                         item {
                             Text(
-                                "このカードにログイン情報を紐づけると、次からはかざすだけでログインできます。",
+                                if (already) {
+                                    "このカードは登録済みです。入力して保存すると上書きします。"
+                                } else {
+                                    "このカードにログイン情報を紐づけると、次からはかざすだけでログインできます。"
+                                },
                                 style = MaterialTheme.typography.bodyMedium,
+                            )
+                        }
+                        item {
+                            OutlinedTextField(
+                                value = label,
+                                onValueChange = { label = it },
+                                label = { Text("名前（任意・誰のカードか分かるように）") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
                             )
                         }
                         item {
@@ -1683,9 +1740,14 @@ private fun StudentCardPanel(
                                 onClick = {
                                     message = if (loginId.isBlank() || password.isBlank()) {
                                         "ID とパスワードを入力してください"
-                                    } else if (onRegister(result.idm, loginId.trim(), password)) {
+                                    } else if (
+                                        onRegister(result.idm, label.trim(), loginId.trim(), password)
+                                    ) {
+                                        label = ""
+                                        loginId = ""
                                         password = ""
-                                        "このカードを登録しました"
+                                        onClear()
+                                        "登録しました"
                                     } else {
                                         "登録できませんでした"
                                     }
@@ -1693,13 +1755,13 @@ private fun StudentCardPanel(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .heightIn(min = 52.dp),
-                            ) { Text("このカードに紐づけて登録") }
+                            ) { Text(if (already) "上書きして登録" else "このカードを登録") }
                         }
                         item {
                             OutlinedButton(
                                 onClick = onClear,
                                 modifier = Modifier.fillMaxWidth(),
-                            ) { Text("読み直す") }
+                            ) { Text("やめる") }
                         }
                         item {
                             Text(
@@ -1718,6 +1780,57 @@ private fun StudentCardPanel(
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.primary,
                             )
+                        }
+                    }
+
+                    // --- 登録済みの一覧 ---
+                    if (entries.isNotEmpty()) {
+                        item {
+                            Text(
+                                "登録済み（${entries.size} 枚）",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 8.dp, start = 4.dp),
+                            )
+                        }
+                        items(entries) { entry ->
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = MaterialTheme.shapes.medium,
+                                colors = listCardColors(),
+                                elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+                                border = listCardBorder(),
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(
+                                        start = 16.dp, end = 8.dp, top = 12.dp, bottom = 12.dp,
+                                    ),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            entry.label.ifBlank {
+                                                entry.loginId.ifBlank { "(名前なし)" }
+                                            },
+                                            style = MaterialTheme.typography.titleSmall,
+                                        )
+                                        Text(
+                                            buildString {
+                                                if (entry.loginId.isNotBlank() &&
+                                                    entry.label.isNotBlank()
+                                                ) {
+                                                    append(entry.loginId)
+                                                    append(" ・ ")
+                                                }
+                                                append(entry.idm)
+                                            },
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                    TextButton(onClick = { removeTarget = entry }) { Text("削除") }
+                                }
+                            }
                         }
                     }
                 }
