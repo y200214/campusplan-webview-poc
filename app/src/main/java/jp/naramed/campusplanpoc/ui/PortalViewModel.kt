@@ -51,7 +51,7 @@ class PortalViewModel : ViewModel() {
         /** 本人がポータル上でログインする画面。ここだけは WebView を見せる必要がある */
         LOGIN,
         HOME,
-        TIMETABLE,
+        /** 履修科目とそのシラバス。旧 TIMETABLE と統合した */
         SYLLABUS_LIST,
         SYLLABUS_SEARCH,
         STUDENT_CARD,

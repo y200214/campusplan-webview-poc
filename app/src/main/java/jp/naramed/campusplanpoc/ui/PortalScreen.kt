@@ -218,20 +218,20 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
     }
 
     /**
-     * 履修時間割を開く。
+     * 履修科目を開く。
      *
-     * WebView を時間割ページへ飛ばし、抽出が終わるまでネイティブのローディングを出す。
-     * この間ポータルは見せない（抽出は onPageFinished 側で自動的に走る）。
+     * かつては「履修時間割」と「シラバス一覧」に分かれていたが、
+     * どちらも同じ 11 科目を同じページから抜いていて実質同じ画面だった。
+     * （曜日×時限のグリッドを出せれば差別化できるが、対象が集中講義のみで
+     * 曜日も時限も持たないため意味がない。実測で確認済み）
      *
-     * @param thenDigest true なら抽出後にそのまま全科目のシラバス取得へ進む
+     * 統合して、開いた瞬間に科目一覧を出し、シラバスは裏で順に埋めていく形にした。
+     * 待たせずに出て、情報は後から揃う。
      */
-    val openTimeTable: (Boolean) -> Unit = { thenDigest ->
-        viewModel.navigate(
-            if (thenDigest) PortalViewModel.AppScreen.SYLLABUS_LIST
-            else PortalViewModel.AppScreen.TIMETABLE
-        )
+    val openCourses: () -> Unit = {
+        viewModel.navigate(PortalViewModel.AppScreen.SYLLABUS_LIST)
         viewModel.setTimeTableLoading(true)
-        pendingDigest = thenDigest
+        pendingDigest = true
         webView.loadAllowedUrl(PortalConfig.absoluteUrl("/portal/TimeTable"))
     }
 
@@ -339,7 +339,11 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
                     leftApp = true
                 }
                 Lifecycle.Event.ON_START -> {
-                    // 戻ってきた。離れていたなら終了するか確認する
+                    // 戻ってきた時点を操作とみなす。
+                    // 離れていた時間を無操作時間に足すと、戻った瞬間に落ちる。
+                    lastInteraction = SystemClock.elapsedRealtime()
+                    idleWarningLeft = 0
+                    // 離れていたなら終了するか確認する
                     if (leftApp) {
                         leftApp = false
                         if (AppSettings.confirmExitOnReturn(context) &&
@@ -362,7 +366,12 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
         }
     }
 
-    // 時間割が取れたら、待っていたシラバス一覧の取得を始める
+    /*
+     * 時間割が取れたら、すぐ一覧を出してからシラバスを取りに行く。
+     *
+     * startSyllabusDigest が全科目を「取得中」で並べるので、
+     * 利用者は待たずに科目名を見られる。取れた順に状態が埋まっていく。
+     */
     LaunchedEffect(state.timeTable, pendingDigest) {
         val table = state.timeTable
         if (pendingDigest && table != null && table.entries.isNotEmpty()) {
@@ -465,6 +474,16 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
             idleWarningLeft = 0
             return@LaunchedEffect
         }
+        /*
+         * 監視を始める時点で必ず時計を戻す。
+         *
+         * これが無いと、アプリ起動からログインまでの時間が経過時間に算入され、
+         * ログイン画面に長くいただけで「ログインした瞬間にログアウト」する
+         * （実機で発生）。計測したいのは「ログイン後に触られていない時間」。
+         */
+        lastInteraction = SystemClock.elapsedRealtime()
+        idleWarningLeft = 0
+
         val warnAt = 15
         while (true) {
             delay(1000)
@@ -529,8 +548,7 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
     val screenTitle = when (screen) {
         PortalViewModel.AppScreen.LOGIN -> "ログイン"
         PortalViewModel.AppScreen.HOME -> "CampusPlan"
-        PortalViewModel.AppScreen.TIMETABLE -> "履修時間割"
-        PortalViewModel.AppScreen.SYLLABUS_LIST -> "シラバス一覧"
+        PortalViewModel.AppScreen.SYLLABUS_LIST -> "履修科目"
         PortalViewModel.AppScreen.SYLLABUS_SEARCH -> "シラバス検索"
         PortalViewModel.AppScreen.STUDENT_CARD -> "学生証"
         PortalViewModel.AppScreen.PORTAL -> state.portalTitle.ifBlank { "ポータル" }
@@ -818,8 +836,7 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
                 if (!webVisible) {
                     when (screen) {
                         PortalViewModel.AppScreen.HOME -> HomePanel(
-                            onOpenTimeTable = { openTimeTable(false) },
-                            onOpenSyllabusList = { openTimeTable(true) },
+                            onOpenCourses = openCourses,
                             onOpenSearch = openSearch,
                             onOpenStudentCard = {
                                 viewModel.navigate(PortalViewModel.AppScreen.STUDENT_CARD)
@@ -829,22 +846,6 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
                                 webView.loadAllowedUrl(PortalConfig.absoluteUrl(shortcut.path))
                             },
                         )
-
-                        PortalViewModel.AppScreen.TIMETABLE -> {
-                            val timeTable = state.timeTable
-                            if (timeTable != null && timeTable.entries.isNotEmpty()) {
-                                TimeTablePanel(
-                                    timeTable = timeTable,
-                                    onClose = { viewModel.navigate(PortalViewModel.AppScreen.HOME) },
-                                    onCourseClick = { course ->
-                                        openSyllabus(course.kogiCd, course.kogiNm)
-                                    },
-                                    onDigestAll = { runSyllabusDigest(timeTable.distinctCourses) },
-                                )
-                            } else {
-                                LoadingScreen("履修時間割を読み込んでいます…")
-                            }
-                        }
 
                         PortalViewModel.AppScreen.STUDENT_CARD -> StudentCardPanel(
                             result = state.cardRead,
@@ -1464,8 +1465,7 @@ private fun ApiRow(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun HomePanel(
-    onOpenTimeTable: () -> Unit,
-    onOpenSyllabusList: () -> Unit,
+    onOpenCourses: () -> Unit,
     onOpenSearch: () -> Unit,
     onOpenStudentCard: () -> Unit,
     onOpenPortalFeature: (PortalShortcut) -> Unit,
@@ -1497,16 +1497,9 @@ private fun HomePanel(
             }
             item {
                 HomeCard(
-                    title = "履修時間割",
-                    subtitle = "登録している科目を一覧で見る",
-                    onClick = onOpenTimeTable,
-                )
-            }
-            item {
-                HomeCard(
-                    title = "シラバス一覧",
-                    subtitle = "履修科目のシラバスをまとめて取得して読む",
-                    onClick = onOpenSyllabusList,
+                    title = "履修科目",
+                    subtitle = "登録科目とそのシラバスをまとめて見る",
+                    onClick = onOpenCourses,
                 )
             }
             item {
