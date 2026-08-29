@@ -1618,6 +1618,25 @@ private fun StudentCardPanel(
     var message by remember { mutableStateOf<String?>(null) }
     var removeTarget by remember { mutableStateOf<CredentialStore.Entry?>(null) }
 
+    /*
+     * 登録済みのカードをかざした場合は、いきなり入力欄を出さない。
+     * まず「誰のカードか」を見せて、編集するか削除するかを選ばせる。
+     * 編集を選んだときだけ入力欄を出す。
+     */
+    var editing by remember(result?.idm) { mutableStateOf(false) }
+    val known = result?.let { read ->
+        entries.firstOrNull { it.idm.equals(read.idm, ignoreCase = true) }
+    }
+
+    // 編集に入るとき、既存の値を初期値として入れておく
+    LaunchedEffect(editing, known?.idm) {
+        if (editing && known != null) {
+            label = known.label
+            loginId = known.loginId
+            password = ""
+        }
+    }
+
     removeTarget?.let { target ->
         AlertDialog(
             onDismissRequest = { removeTarget = null },
@@ -1632,6 +1651,9 @@ private fun StudentCardPanel(
                 TextButton(onClick = {
                     onRemove(target.idm)
                     removeTarget = null
+                    editing = false
+                    // いま読み取っているカードを消した場合は、その表示も畳む
+                    if (result?.idm.equals(target.idm, ignoreCase = true)) onClear()
                     message = "削除しました"
                 }) { Text("削除") }
             },
@@ -1691,13 +1713,70 @@ private fun StudentCardPanel(
                                 }
                             }
                         }
+                    } else if (known != null && !editing) {
+                        // --- 登録済みのカード。誰のものかを見せて、次の操作を選ばせる ---
+                        item {
+                            Surface(
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = MaterialTheme.shapes.large,
+                                color = MaterialTheme.colorScheme.primaryContainer,
+                                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                            ) {
+                                Column(modifier = Modifier.padding(24.dp)) {
+                                    Text(
+                                        "登録済みのカードです",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                                            .copy(alpha = 0.78f),
+                                    )
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Text(
+                                        known.label.ifBlank {
+                                            known.loginId.ifBlank { "(名前なし)" }
+                                        },
+                                        style = MaterialTheme.typography.headlineSmall,
+                                    )
+                                    if (known.label.isNotBlank() && known.loginId.isNotBlank()) {
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Text(
+                                            known.loginId,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                                                .copy(alpha = 0.78f),
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        item { CardField("カード識別子 (IDm)", result.idm) }
+                        item {
+                            Button(
+                                onClick = { editing = true },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 52.dp),
+                            ) { Text("登録内容を編集する") }
+                        }
+                        item {
+                            OutlinedButton(
+                                onClick = { removeTarget = known },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) { Text("この登録を削除する") }
+                        }
+                        item {
+                            TextButton(
+                                onClick = onClear,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) { Text("別のカードを読む") }
+                        }
                     } else {
-                        val already = entries.any { it.idm.equals(result.idm, ignoreCase = true) }
+                        val already = known != null
                         item { CardField("カード識別子 (IDm)", result.idm) }
                         item {
                             Text(
                                 if (already) {
-                                    "このカードは登録済みです。入力して保存すると上書きします。"
+                                    "登録内容を変更します。パスワードは保存済みのものを表示できないため、" +
+                                        "入力し直してください。"
                                 } else {
                                     "このカードにログイン情報を紐づけると、次からはかざすだけでログインできます。"
                                 },
@@ -1746,8 +1825,9 @@ private fun StudentCardPanel(
                                         label = ""
                                         loginId = ""
                                         password = ""
+                                        editing = false
                                         onClear()
-                                        "登録しました"
+                                        if (already) "登録内容を更新しました" else "登録しました"
                                     } else {
                                         "登録できませんでした"
                                     }
@@ -1755,13 +1835,23 @@ private fun StudentCardPanel(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .heightIn(min = 52.dp),
-                            ) { Text(if (already) "上書きして登録" else "このカードを登録") }
+                            ) { Text(if (already) "更新する" else "このカードを登録") }
                         }
                         item {
                             OutlinedButton(
-                                onClick = onClear,
+                                onClick = {
+                                    if (editing) {
+                                        // 編集をやめる。カードの表示には戻る
+                                        editing = false
+                                        label = ""
+                                        loginId = ""
+                                        password = ""
+                                    } else {
+                                        onClear()
+                                    }
+                                },
                                 modifier = Modifier.fillMaxWidth(),
-                            ) { Text("やめる") }
+                            ) { Text(if (editing) "編集をやめる" else "やめる") }
                         }
                         item {
                             Text(
