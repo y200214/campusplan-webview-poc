@@ -1,5 +1,6 @@
 package jp.naramed.campusplanpoc.ui
 
+import android.os.SystemClock
 import android.util.Log
 import android.webkit.WebView
 import androidx.activity.compose.BackHandler
@@ -45,6 +46,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
@@ -55,12 +57,16 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -125,6 +131,36 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
     var pendingDigest by remember { mutableStateOf(false) }
     // ログアウトの確認ダイアログ
     var showLogoutConfirm by remember { mutableStateOf(false) }
+    // 他アプリへ移ったことの記録と、戻ってきたときの確認
+    var leftApp by remember { mutableStateOf(false) }
+    var showExitConfirm by remember { mutableStateOf(false) }
+
+    /*
+     * 無操作タイムアウト。共用端末で最も効く仕組み。
+     *
+     * 「終わったらログアウトする」を利用者の記憶に頼ると必ず押し忘れが出る。
+     * 前の人の画面が残ったまま次の人が座る事故を、仕組みで防ぐ。
+     *
+     * 最後に操作した時刻を持ち、一定時間触られなければログアウトする。
+     * いきなり消えると使用中の人が驚くので、切れる前に警告を出して延長できるようにする。
+     */
+    val idleTimeout = remember { AppSettings.idleTimeoutSeconds(context) }
+    var lastInteraction by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
+    var idleWarningLeft by remember { mutableIntStateOf(0) }
+
+    fun noteInteraction() {
+        lastInteraction = SystemClock.elapsedRealtime()
+        if (idleWarningLeft > 0) idleWarningLeft = 0
+    }
+
+    // WebView 内のタップは Compose 側に届かないので、View 側でも拾う
+    DisposableEffect(webView) {
+        webView.setOnTouchListener { _, _ ->
+            noteInteraction()
+            false // 触っただけ。イベントは WebView にそのまま渡す
+        }
+        onDispose { webView.setOnTouchListener(null) }
+    }
 
     /**
      * シラバス取得の入口。ここを通さずに fetcher を直接呼ばないこと。
@@ -290,9 +326,29 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
             when (event) {
                 Lifecycle.Event.ON_RESUME -> webView.onResume()
                 Lifecycle.Event.ON_PAUSE -> webView.onPause()
-                Lifecycle.Event.ON_STOP ->
-                    // Cookie を永続領域へ書き出し、プロセス終了でログイン状態が消えるのを防ぐ
+                Lifecycle.Event.ON_STOP -> {
                     WebViewSecurity.flushCookies()
+                    /*
+                     * 他のアプリへ移った（あるいは画面が消えた）ことを記録しておく。
+                     *
+                     * バックグラウンドへ行った「瞬間」にダイアログは出せないので、
+                     * ここでは印を付けるだけにして、戻ってきたときに確認する。
+                     * 席を離れた隙に他人が触る状況を想定しているため、
+                     * 戻り側で訊けば目的は果たせる。
+                     */
+                    leftApp = true
+                }
+                Lifecycle.Event.ON_START -> {
+                    // 戻ってきた。離れていたなら終了するか確認する
+                    if (leftApp) {
+                        leftApp = false
+                        if (AppSettings.confirmExitOnReturn(context) &&
+                            !viewModel.state.value.needsLogin
+                        ) {
+                            showExitConfirm = true
+                        }
+                    }
+                }
                 else -> Unit
             }
         }
@@ -400,6 +456,32 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
         webView.loadAllowedUrl(PortalConfig.START_URL)
     }
 
+    /*
+     * 無操作の監視。ログイン中だけ動かす。
+     * 残り 15 秒を切ったら警告を出し、触れば延長される。
+     */
+    LaunchedEffect(idleTimeout, state.needsLogin) {
+        if (idleTimeout <= 0 || state.needsLogin) {
+            idleWarningLeft = 0
+            return@LaunchedEffect
+        }
+        val warnAt = 15
+        while (true) {
+            delay(1000)
+            val idleSec = ((SystemClock.elapsedRealtime() - lastInteraction) / 1000).toInt()
+            val remaining = idleTimeout - idleSec
+            when {
+                remaining <= 0 -> {
+                    idleWarningLeft = 0
+                    logout()
+                    return@LaunchedEffect
+                }
+                remaining <= warnAt -> idleWarningLeft = remaining
+                else -> if (idleWarningLeft != 0) idleWarningLeft = 0
+            }
+        }
+    }
+
     val screen = state.screen
     val isLogin = screen == PortalViewModel.AppScreen.LOGIN
     val isPortalView = screen == PortalViewModel.AppScreen.PORTAL
@@ -505,6 +587,67 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
             }
         }
     ) { innerPadding ->
+        /*
+         * 無操作の警告。
+         *
+         * 黙って落とすと、少し考えていただけの人が驚く。
+         * 残り時間を見せて、続けるかどうかを選ばせる。
+         * ダイアログの外を触っても延長する（使う気があるのは明らかなので）。
+         */
+        if (idleWarningLeft > 0) {
+            AlertDialog(
+                onDismissRequest = { noteInteraction() },
+                title = { Text("まもなくログアウトします") },
+                text = {
+                    Text(
+                        "操作がないため、あと ${idleWarningLeft} 秒でログアウトします。" +
+                            "続ける場合は「続ける」を押してください。"
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = { noteInteraction() }) { Text("続ける") }
+                },
+                dismissButton = {
+                    TextButton(onClick = {
+                        idleWarningLeft = 0
+                        logout()
+                    }) { Text("今すぐログアウト") }
+                },
+            )
+        }
+
+        /*
+         * 他のアプリから戻ってきたときの確認。
+         *
+         * 「離席した隙に他人が続きを触る」を防ぐのが目的なので、
+         * 既定を「終了する」側に寄せ、続けるほうを明示的に選ばせる。
+         */
+        if (showExitConfirm) {
+            AlertDialog(
+                onDismissRequest = { showExitConfirm = false },
+                title = { Text("アプリを終了しますか") },
+                text = {
+                    Text(
+                        "他のアプリに移動していました。" +
+                            "終了するとログアウトします。続ける場合はそのままご利用ください。"
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        showExitConfirm = false
+                        logout()
+                        // キオスク中は終了できない（ホームがこのアプリのため）。
+                        // その場合はログアウトだけして画面に留まる。
+                        val act = context as? android.app.Activity
+                        if (act != null && !KioskManager.isLocked(act)) act.finish()
+                    }) { Text("終了する") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showExitConfirm = false }) { Text("続ける") }
+                },
+            )
+        }
+
         if (showLogoutConfirm) {
             AlertDialog(
                 onDismissRequest = { showLogoutConfirm = false },
@@ -535,6 +678,16 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
+                // 画面のどこを触っても無操作タイマーを延ばす。
+                // Initial パスで拾うので、下の要素の操作を妨げない。
+                .pointerInput(Unit) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            awaitPointerEvent(PointerEventPass.Initial)
+                            noteInteraction()
+                        }
+                    }
+                }
         ) {
             // ページ読み込みの進捗は、ポータルを見せている画面でだけ意味がある
             if (state.isLoading && webVisible) {
@@ -1973,6 +2126,12 @@ private fun StudentCardPanel(
                         AutoLogoutSection(onRequireAdmin = { action -> requireAdmin(action) })
                     }
                     item {
+                        IdleTimeoutSection(onRequireAdmin = { action -> requireAdmin(action) })
+                    }
+                    item {
+                        ConfirmExitSection(onRequireAdmin = { action -> requireAdmin(action) })
+                    }
+                    item {
                         KioskSection(onRequireAdmin = { action -> requireAdmin(action) })
                     }
                     item {
@@ -2031,6 +2190,138 @@ private fun AutoLogoutSection(
                 onCheckedChange = { next ->
                     onRequireAdmin {
                         AppSettings.setAutoLogoutOnLaunch(context, next)
+                        enabled = next
+                    }
+                },
+            )
+        }
+    }
+}
+
+/**
+ * 無操作タイムアウトの設定。
+ *
+ * 共用端末で最も効く仕組みなので、既定を有効（90 秒）にしてある。
+ * 「終わったらログアウトする」を利用者の記憶に頼らないための設定。
+ * 変更は反映のためアプリの再起動が要る旨を書いておく。
+ */
+@Composable
+private fun IdleTimeoutSection(
+    onRequireAdmin: (() -> Unit) -> Unit,
+) {
+    val context = LocalContext.current
+    var seconds by remember { mutableIntStateOf(AppSettings.idleTimeoutSeconds(context)) }
+    var expanded by remember { mutableStateOf(false) }
+
+    fun labelFor(v: Int) = if (v == 0) "しない" else "$v 秒"
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.medium,
+        colors = listCardColors(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        border = listCardBorder(),
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("無操作で自動ログアウト", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        if (seconds == 0) {
+                            "無効。操作がなくてもログアウトしません"
+                        } else {
+                            "${seconds} 秒。切れる前に確認を出します"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                TextButton(onClick = { expanded = !expanded }) {
+                    Text(if (expanded) "閉じる" else "変更")
+                }
+            }
+
+            if (expanded) {
+                Spacer(modifier = Modifier.height(8.dp))
+                AppSettings.IDLE_TIMEOUT_CHOICES.forEach { choice ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                onRequireAdmin {
+                                    AppSettings.setIdleTimeoutSeconds(context, choice)
+                                    seconds = choice
+                                    expanded = false
+                                }
+                            }
+                            .padding(vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(
+                            selected = seconds == choice,
+                            onClick = {
+                                onRequireAdmin {
+                                    AppSettings.setIdleTimeoutSeconds(context, choice)
+                                    seconds = choice
+                                    expanded = false
+                                }
+                            },
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(labelFor(choice), style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+                Text(
+                    "変更はアプリを開き直すと反映されます。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 「他のアプリに移ったら終了を確認する」の設定。
+ *
+ * バックグラウンドへ行った瞬間には訊けないので、戻ってきたときに訊く。
+ * 席を離れた隙に他人が続きを触る状況を防ぐのが目的。
+ */
+@Composable
+private fun ConfirmExitSection(
+    onRequireAdmin: (() -> Unit) -> Unit,
+) {
+    val context = LocalContext.current
+    var enabled by remember { mutableStateOf(AppSettings.confirmExitOnReturn(context)) }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.medium,
+        colors = listCardColors(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        border = listCardBorder(),
+    ) {
+        Row(
+            modifier = Modifier.padding(start = 16.dp, end = 12.dp, top = 14.dp, bottom = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("他のアプリに移ったら確認", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    if (enabled) {
+                        "戻ってきたときに、終了するか尋ねます"
+                    } else {
+                        "他のアプリに移っても、そのまま使い続けられます"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(
+                checked = enabled,
+                onCheckedChange = { next ->
+                    onRequireAdmin {
+                        AppSettings.setConfirmExitOnReturn(context, next)
                         enabled = next
                     }
                 },
