@@ -29,6 +29,7 @@ class PageFetcher(private val assets: AssetManager) {
         private const val SCRIPT_COMPARE = "js/api_compare.js"
         private const val SCRIPT_SYLLABUS = "js/syllabus_fetch.js"
         private const val SCRIPT_SEARCH = "js/syllabus_search.js"
+        private const val SCRIPT_LOGIN = "js/login_autofill.js"
 
         /** ログへ出してはいけないキー */
         private val REDACT_KEYS = setOf(
@@ -85,11 +86,52 @@ class PageFetcher(private val assets: AssetManager) {
         webView.evaluateJavascript(script, null)
     }
 
+    /**
+     * ログインフォームに入力して送信する。
+     *
+     * 押すのはポータル本来のログインボタン。認証の偽装も迂回もしない。
+     * 資格情報は JS の引数としてページへ渡るだけで、**ログには一切出さない**。
+     */
+    fun submitLogin(
+        webView: WebView,
+        loginId: String,
+        password: String,
+        onResult: (Boolean, String?) -> Unit,
+    ) {
+        if (!UrlPolicy.isAllowed(webView.url)) {
+            onResult(false, "現在のページが allowlist 外です")
+            return
+        }
+        val id = "login-${counter++}"
+        pendingLogin[id] = onResult
+
+        val script = template(SCRIPT_LOGIN)
+            .replace("__LOGINID__", JSONObject.quote(loginId))
+            .replace("__PASSWORD__", JSONObject.quote(password))
+            .replace("__ID__", JSONObject.quote(id))
+
+        // 値そのものは出さない。実行した事実だけ残す。
+        Log.d(TAG, "ログイン入力を実行 id=$id")
+        webView.evaluateJavascript(script, null)
+    }
+
+    /** ログイン入力の応答待ち */
+    private val pendingLogin = mutableMapOf<String, (Boolean, String?) -> Unit>()
+
     /** PortalBridge のコールバックから呼ぶ。メインスレッドで呼ばれる。 */
     fun onBridgeMessage(raw: String) {
         // 応答が 2 種類あるので、まず id で振り分ける
         val id = runCatching { JSONObject(JSONTokener(raw).nextValue().toString()).optString("id") }
             .getOrNull().orEmpty()
+        if (id.isNotEmpty() && pendingLogin.containsKey(id)) {
+            val callback = pendingLogin.remove(id)
+            val obj = runCatching { JSONObject(JSONTokener(raw).nextValue().toString()) }.getOrNull()
+            val ok = obj?.optBoolean("ok") ?: false
+            val error = obj?.optString("error").orEmpty().ifEmpty { null }
+            Log.d(TAG, "ログイン入力の結果: ok=$ok error=${error ?: "-"}")
+            callback?.invoke(ok, error)
+            return
+        }
         if (id.isNotEmpty() && pendingSearch.containsKey(id)) {
             val callback = pendingSearch.remove(id)
             val result = runCatching { json.decodeFromString<SyllabusSearchResult>(raw) }

@@ -151,4 +151,20 @@ object PortalConfig {
     /** シラバス検索画面かどうか。独自 UI からの検索はこの画面でしか動かない。 */
     fun isSyllabusKensakuUrl(url: String?): Boolean =
         url != null && url.contains("/wsl/SyllabusKensaku", ignoreCase = true)
+
+    /**
+     * ポータル（/portal/）から CampusPlan Smart（/cpsmart/）へ SSO する入口。
+     *
+     * この 2 つは **セッションが別**。/portal/ にログインしただけでは /cpsmart/ は
+     * 未認証で、直接 /cpsmart/ の URL を開くと cpsmart 側のログイン画面へ飛ばされる。
+     * ここを一度踏むと SSO が走って cpsmart のセッションが張られる。
+     */
+    const val CPSMART_SSO_PATH = "/portal/External/RedirectLinkCpSmart?linkid=1900/3000090"
+
+    fun isCpsmartUrl(url: String?): Boolean =
+        url != null && url.contains("/cpsmart/", ignoreCase = true)
+
+    /** cpsmart 側のログイン画面へ飛ばされた＝まだ SSO できていない */
+    fun isCpsmartLoginUrl(url: String?): Boolean =
+        isCpsmartUrl(url) && url!!.contains("/Account/Login", ignoreCase = true)
 }

@@ -61,7 +61,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
+import jp.naramed.campusplanpoc.auth.CredentialStore
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -72,6 +76,12 @@ import jp.naramed.campusplanpoc.PortalConfig
 import jp.naramed.campusplanpoc.model.ApiResponse
 import jp.naramed.campusplanpoc.model.NetworkObservation
 import jp.naramed.campusplanpoc.model.PageStructure
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
+import jp.naramed.campusplanpoc.nfc.FelicaReader
+import jp.naramed.campusplanpoc.nfc.NfcAvailability
+import jp.naramed.campusplanpoc.nfc.NfcReaderEffect
+import jp.naramed.campusplanpoc.nfc.nfcAvailability
 import jp.naramed.campusplanpoc.model.PortalShortcut
 import jp.naramed.campusplanpoc.model.SearchUiState
 import jp.naramed.campusplanpoc.model.SyllabusSearchResult
@@ -294,24 +304,87 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
         }
     }
 
+    // 登録済み IDm を一度だけ読み込む
+    LaunchedEffect(Unit) {
+        viewModel.setRegisteredIdm(CredentialStore.registeredIdm(context))
+    }
+
+    /*
+     * ログインの結末を判定する。
+     *
+     * フォームの送信自体は成功しても、ID やパスワードが違えばポータルは
+     * ログイン画面を出し直す。送信後にまた LOGIN_REQUIRED を観測したら失敗とみなす。
+     * 成功していれば needsLogin が false になり、上の遷移でホームへ移る。
+     */
+    LaunchedEffect(state.sessionState, state.loginState) {
+        if (state.loginState !is LoginState.InProgress) return@LaunchedEffect
+        when (state.sessionState) {
+            SessionState.LOGIN_REQUIRED ->
+                viewModel.setLoginState(
+                    LoginState.Failed("ログインIDかパスワードが違うようです")
+                )
+            SessionState.LOGGED_IN_PROBABLE -> viewModel.setLoginState(LoginState.Idle)
+            SessionState.UNKNOWN -> Unit
+        }
+    }
+
+    /**
+     * カードタッチによる自動ログイン。
+     *
+     * 復号 → ポータル本来のログインフォームへ入力 → 本来のログインボタンを押す。
+     * 利用者から見えるのは「タッチした → 入れた」だけだが、
+     * 裏で通っているのは正規のログイン経路そのもの。
+     */
+    val loginWithCard: (String) -> Unit = { idm ->
+        val registered = CredentialStore.registeredIdm(context)
+        if (registered == null || !registered.equals(idm, ignoreCase = true)) {
+            viewModel.setLoginState(LoginState.Mismatch)
+        } else {
+            val credential = CredentialStore.load(context)
+            if (credential == null) {
+                viewModel.setLoginState(
+                    LoginState.Failed("保存された情報を読み出せませんでした。登録し直してください")
+                )
+            } else {
+                viewModel.setLoginState(LoginState.InProgress)
+                fetcher.submitLogin(webView, credential.loginId, credential.password) { ok, error ->
+                    if (!ok) {
+                        viewModel.setLoginState(
+                            LoginState.Failed(error ?: "ログインできませんでした")
+                        )
+                    }
+                    // 成功時はログイン判定の変化（needsLogin が false になる）に任せる
+                }
+            }
+        }
+    }
+
     val screen = state.screen
     val isLogin = screen == PortalViewModel.AppScreen.LOGIN
     val isPortalView = screen == PortalViewModel.AppScreen.PORTAL
 
     /*
-     * 素のポータルを見せてよいのは、この 2 画面だけ。
-     *  - LOGIN : 本人がポータル上でログインする（アプリは資格情報を扱わない）
-     *  - PORTAL: ネイティブ UI が無い機能を「意図して」アプリ内ブラウザで開く
-     * それ以外では下の Box で必ず不透明なネイティブ画面を被せる。
+     * 素のポータルを見せてよいのは、アプリ内ブラウザ（PORTAL）だけ。
+     *
+     * ログイン画面も独自 UI にしたので、通常の利用でポータルの生ページが
+     * 見えることはない。WebView は破棄せず裏で動かし続け、
+     * ログインの送信もデータ取得もそこで行う。
      */
-    val webVisible = isLogin || isPortalView
+    val webVisible = isPortalView
 
-    // ログインが必要になったらログイン画面へ寄せ、済んだらホームへ戻す。
-    // needsLogin は遷移中の UNKNOWN では揺れない（everLoggedIn を見ている）。
-    LaunchedEffect(state.needsLogin) {
+    /*
+     * ログインが必要になったらログイン画面へ寄せ、済んだらホームへ戻す。
+     * needsLogin は遷移中の UNKNOWN では揺れない（everLoggedIn を見ている）。
+     *
+     * 学生証の読み取りだけは例外にする。カードを読むのは端末の NFC の話で、
+     * ポータルのセッションとは無関係。未ログインでも使えなければおかしい。
+     */
+    LaunchedEffect(state.needsLogin, screen) {
+        val current = viewModel.state.value.screen
+        if (current == PortalViewModel.AppScreen.STUDENT_CARD) return@LaunchedEffect
         if (state.needsLogin) {
             viewModel.navigate(PortalViewModel.AppScreen.LOGIN)
-        } else if (viewModel.state.value.screen == PortalViewModel.AppScreen.LOGIN) {
+        } else if (current == PortalViewModel.AppScreen.LOGIN) {
             viewModel.navigate(PortalViewModel.AppScreen.HOME)
         }
     }
@@ -324,6 +397,8 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
             state.showNetwork -> viewModel.setShowNetwork(false)
             state.showStructure -> viewModel.setShowStructure(false)
             isPortalView && state.canGoBack -> webView.goBack()
+            // 未ログイン中に学生証を見ていた場合はログイン画面へ戻す
+            state.needsLogin -> viewModel.navigate(PortalViewModel.AppScreen.LOGIN)
             else -> viewModel.navigate(PortalViewModel.AppScreen.HOME)
         }
     }
@@ -334,6 +409,7 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
         PortalViewModel.AppScreen.TIMETABLE -> "履修時間割"
         PortalViewModel.AppScreen.SYLLABUS_LIST -> "シラバス一覧"
         PortalViewModel.AppScreen.SYLLABUS_SEARCH -> "シラバス検索"
+        PortalViewModel.AppScreen.STUDENT_CARD -> "学生証"
         PortalViewModel.AppScreen.PORTAL -> state.portalTitle.ifBlank { "ポータル" }
         PortalViewModel.AppScreen.DEV_TOOLS -> "開発ツール"
     }
@@ -353,11 +429,20 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
                 navigationIcon = {
                     if (screen != PortalViewModel.AppScreen.HOME && !isLogin) {
                         TextButton(onClick = {
-                            viewModel.navigate(PortalViewModel.AppScreen.HOME)
+                            viewModel.navigate(
+                                if (state.needsLogin) PortalViewModel.AppScreen.LOGIN
+                                else PortalViewModel.AppScreen.HOME
+                            )
                         }) { Text("戻る") }
                     }
                 },
                 actions = {
+                    // 学生証の読み取りはログイン不要なので、ログイン画面からも入れる
+                    if (isLogin) {
+                        TextButton(onClick = {
+                            viewModel.navigate(PortalViewModel.AppScreen.STUDENT_CARD)
+                        }) { Text("学生証") }
+                    }
                     // ログイン状態はホームとログイン画面でだけ出す。
                     // 各機能の画面では、遷移のたびに「状態不明」が点滅して邪魔になる。
                     if (screen == PortalViewModel.AppScreen.HOME || isLogin) {
@@ -491,6 +576,14 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
                     },
                 )
 
+                // ログイン画面ではカードのタッチを待ち受ける
+                if (isLogin && state.registeredIdm != null) {
+                    val cardScope = rememberCoroutineScope()
+                    NfcReaderEffect(enabled = true) { read ->
+                        cardScope.launch { loginWithCard(read.idm) }
+                    }
+                }
+
                 /*
                  * ここが「素の Web を見せない」ための要。
                  *
@@ -504,6 +597,9 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
                             onOpenTimeTable = { openTimeTable(false) },
                             onOpenSyllabusList = { openTimeTable(true) },
                             onOpenSearch = openSearch,
+                            onOpenStudentCard = {
+                                viewModel.navigate(PortalViewModel.AppScreen.STUDENT_CARD)
+                            },
                             onOpenPortalFeature = { shortcut ->
                                 viewModel.openPortalView(shortcut.label)
                                 webView.loadAllowedUrl(PortalConfig.absoluteUrl(shortcut.path))
@@ -525,6 +621,25 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
                                 LoadingScreen("履修時間割を読み込んでいます…")
                             }
                         }
+
+                        PortalViewModel.AppScreen.STUDENT_CARD -> StudentCardPanel(
+                            result = state.cardRead,
+                            registeredIdm = state.registeredIdm,
+                            onRead = viewModel::onCardRead,
+                            onClear = viewModel::clearCardRead,
+                            onRegister = { idm, loginId, password ->
+                                val saved = CredentialStore.save(
+                                    context, idm,
+                                    CredentialStore.Credential(loginId, password),
+                                )
+                                if (saved) viewModel.setRegisteredIdm(idm)
+                                saved
+                            },
+                            onUnregister = {
+                                CredentialStore.clear(context)
+                                viewModel.setRegisteredIdm(null)
+                            },
+                        )
 
                         PortalViewModel.AppScreen.SYLLABUS_SEARCH -> SyllabusSearchPanel(
                             state = state.search,
@@ -551,8 +666,25 @@ fun PortalScreen(viewModel: PortalViewModel = viewModel()) {
                         PortalViewModel.AppScreen.DEV_TOOLS ->
                             Surface(modifier = Modifier.fillMaxSize()) {}
 
+                        PortalViewModel.AppScreen.LOGIN -> LoginPanel(
+                            state = state.loginState,
+                            cardRegistered = state.registeredIdm != null,
+                            onSubmit = { loginId, password ->
+                                viewModel.setLoginState(LoginState.InProgress)
+                                fetcher.submitLogin(webView, loginId, password) { ok, error ->
+                                    if (!ok) {
+                                        viewModel.setLoginState(
+                                            LoginState.Failed(error ?: "ログインできませんでした")
+                                        )
+                                    }
+                                }
+                            },
+                            onOpenCardSetting = {
+                                viewModel.navigate(PortalViewModel.AppScreen.STUDENT_CARD)
+                            },
+                        )
+
                         // webVisible が true の画面。ここには来ない
-                        PortalViewModel.AppScreen.LOGIN,
                         PortalViewModel.AppScreen.PORTAL -> Unit
                     }
                 }
@@ -1109,6 +1241,7 @@ private fun HomePanel(
     onOpenTimeTable: () -> Unit,
     onOpenSyllabusList: () -> Unit,
     onOpenSearch: () -> Unit,
+    onOpenStudentCard: () -> Unit,
     onOpenPortalFeature: (PortalShortcut) -> Unit,
 ) {
     // ネイティブ UI を持つ機能と、まだポータルを開くしかない機能を分けて出す。
@@ -1155,6 +1288,14 @@ private fun HomePanel(
                     title = "シラバス検索",
                     subtitle = "講義コードや名称で探す",
                     onClick = onOpenSearch,
+                )
+            }
+
+            item {
+                HomeCard(
+                    title = "学生証を読む",
+                    subtitle = "カードをかざして中身を確認する",
+                    onClick = onOpenStudentCard,
                 )
             }
 
@@ -1377,6 +1518,389 @@ private fun listCardColors() = CardDefaults.cardColors(
 
 @Composable
 private fun listCardBorder() = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+
+
+/**
+ * Phase 6: 学生証（FeliCa）の読み取りと、カード連携の登録。
+ *
+ * リーダーモードが有効なのはこの画面を開いている間だけ。
+ * 読み取った IDm は、登録するまではどこにも保存されない。
+ */
+@Composable
+private fun StudentCardPanel(
+    result: FelicaReader.Result?,
+    registeredIdm: String?,
+    onRead: (FelicaReader.Result) -> Unit,
+    onClear: () -> Unit,
+    onRegister: (idm: String, loginId: String, password: String) -> Boolean,
+    onUnregister: () -> Unit,
+) {
+    val context = LocalContext.current
+    val availability = remember(context) { nfcAvailability(context as? android.app.Activity) }
+
+    // 読み取りコールバックはワーカースレッドで来るので、状態更新はメインへ戻す
+    val scope = rememberCoroutineScope()
+    NfcReaderEffect(enabled = availability == NfcAvailability.AVAILABLE) { read ->
+        scope.launch { onRead(read) }
+    }
+
+    var loginId by rememberSaveable { mutableStateOf("") }
+    var password by rememberSaveable { mutableStateOf("") }
+    var message by remember { mutableStateOf<String?>(null) }
+
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.surface,
+    ) {
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            when (availability) {
+                NfcAvailability.UNSUPPORTED -> item {
+                    Text(
+                        "この端末は NFC に対応していません。",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+
+                NfcAvailability.DISABLED -> item {
+                    Text(
+                        "NFC がオフになっています。端末の設定でオンにしてから、この画面を開き直してください。",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+
+                NfcAvailability.AVAILABLE -> {
+                    if (registeredIdm != null) {
+                        item {
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = MaterialTheme.shapes.large,
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                ),
+                                elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+                            ) {
+                                Column(modifier = Modifier.padding(20.dp)) {
+                                    Text(
+                                        "カード連携ずみ",
+                                        style = MaterialTheme.typography.titleLarge,
+                                    )
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Text(
+                                        "ログイン画面で学生証をかざすと、自動でログインします。",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                                            .copy(alpha = 0.78f),
+                                    )
+                                }
+                            }
+                        }
+                        item { CardField("登録済みカード (IDm)", registeredIdm) }
+                        item {
+                            OutlinedButton(
+                                onClick = {
+                                    onUnregister()
+                                    loginId = ""
+                                    password = ""
+                                    message = "連携を解除しました"
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) { Text("連携を解除する") }
+                        }
+                        item {
+                            Text(
+                                "解除すると、保存されている ID とパスワードは端末から削除されます。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    } else if (result == null) {
+                        item {
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = MaterialTheme.shapes.large,
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                ),
+                                elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+                            ) {
+                                Column(modifier = Modifier.padding(24.dp)) {
+                                    Text(
+                                        "学生証をかざしてください",
+                                        style = MaterialTheme.typography.titleLarge,
+                                    )
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Text(
+                                        "端末の背面中央あたりにカードを当てます。",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                                            .copy(alpha = 0.78f),
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        item { CardField("カード識別子 (IDm)", result.idm) }
+                        if (result.systemCode.isNotBlank()) {
+                            item { CardField("システムコード", result.systemCode) }
+                        }
+                        item {
+                            Text(
+                                "このカードにログイン情報を紐づけると、次からはかざすだけでログインできます。",
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                        }
+                        item {
+                            OutlinedTextField(
+                                value = loginId,
+                                onValueChange = { loginId = it },
+                                label = { Text("ログインID") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                        item {
+                            OutlinedTextField(
+                                value = password,
+                                onValueChange = { password = it },
+                                label = { Text("パスワード") },
+                                singleLine = true,
+                                visualTransformation = PasswordVisualTransformation(),
+                                keyboardOptions = KeyboardOptions(
+                                    keyboardType = KeyboardType.Password,
+                                ),
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                        item {
+                            Button(
+                                onClick = {
+                                    message = if (loginId.isBlank() || password.isBlank()) {
+                                        "ID とパスワードを入力してください"
+                                    } else if (onRegister(result.idm, loginId.trim(), password)) {
+                                        password = ""
+                                        "このカードを登録しました"
+                                    } else {
+                                        "登録できませんでした"
+                                    }
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 52.dp),
+                            ) { Text("このカードに紐づけて登録") }
+                        }
+                        item {
+                            OutlinedButton(
+                                onClick = onClear,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) { Text("読み直す") }
+                        }
+                        item {
+                            Text(
+                                "入力した情報は、端末の Keystore で暗号化してこの端末にだけ保存します。" +
+                                    "サーバへ送ることはありません。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+
+                    message?.let {
+                        item {
+                            Text(
+                                it,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * ログイン画面。ここも独自 UI にして、ポータルのログインページは見せない。
+ *
+ * 入力欄はネイティブだが、送信するのは裏の WebView にある **本物のログインフォーム**。
+ * 値を入れて本物のログインボタンを押すので、認証の経路は正規のまま。
+ *
+ * @param cardRegistered カード連携済みなら、待機の案内を出してタッチを待つ
+ */
+@Composable
+private fun LoginPanel(
+    state: LoginState,
+    cardRegistered: Boolean,
+    onSubmit: (loginId: String, password: String) -> Unit,
+    onOpenCardSetting: () -> Unit,
+) {
+    var loginId by rememberSaveable { mutableStateOf("") }
+    var password by rememberSaveable { mutableStateOf("") }
+    val busy = state is LoginState.InProgress
+
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.surface,
+    ) {
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(20.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            if (cardRegistered) {
+                item { CardWaitingCard(state) }
+                item {
+                    Text(
+                        "または ID とパスワードでログイン",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 6.dp, start = 4.dp),
+                    )
+                }
+            } else {
+                item {
+                    Text(
+                        "CampusPlan にログイン",
+                        style = MaterialTheme.typography.headlineSmall,
+                    )
+                }
+            }
+
+            item {
+                OutlinedTextField(
+                    value = loginId,
+                    onValueChange = { loginId = it },
+                    label = { Text("ログインID") },
+                    singleLine = true,
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            item {
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    label = { Text("パスワード") },
+                    singleLine = true,
+                    enabled = !busy,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            item {
+                Button(
+                    onClick = { onSubmit(loginId.trim(), password) },
+                    enabled = !busy && loginId.isNotBlank() && password.isNotBlank(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 52.dp),
+                ) { Text(if (busy) "ログインしています…" else "ログイン") }
+            }
+
+            if (busy) {
+                item { LinearProgressIndicator(modifier = Modifier.fillMaxWidth()) }
+            }
+
+            (state as? LoginState.Failed)?.let { failed ->
+                item {
+                    Text(
+                        failed.message,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+
+            if (!cardRegistered) {
+                item {
+                    OutlinedButton(
+                        onClick = onOpenCardSetting,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("学生証でログインできるようにする") }
+                }
+            }
+
+            item {
+                Text(
+                    "入力した内容はポータルのログイン画面へそのまま渡されます。" +
+                        "アプリが保存するのは、学生証と紐づけて登録したときだけです。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+/** 学生証のタッチ待ち。ログイン画面の主役 */
+@Composable
+private fun CardWaitingCard(state: LoginState) {
+    val isError = state is LoginState.Failed || state is LoginState.Mismatch
+    val title = when (state) {
+        LoginState.InProgress -> "ログインしています…"
+        LoginState.Mismatch -> "登録されていないカードです"
+        is LoginState.Failed -> "ログインできませんでした"
+        LoginState.Idle -> "学生証をかざしてください"
+    }
+    val body = when (state) {
+        LoginState.InProgress -> "そのままお待ちください。"
+        LoginState.Mismatch -> "登録した学生証と違うようです。下の入力からもログインできます。"
+        is LoginState.Failed -> state.message
+        LoginState.Idle -> "端末の背面中央あたりにカードを当てると、自動でログインします。"
+    }
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        color = if (isError) MaterialTheme.colorScheme.errorContainer
+        else MaterialTheme.colorScheme.primaryContainer,
+        contentColor = if (isError) MaterialTheme.colorScheme.onErrorContainer
+        else MaterialTheme.colorScheme.onPrimaryContainer,
+    ) {
+        Column(modifier = Modifier.padding(24.dp)) {
+            Text(title, style = MaterialTheme.typography.titleLarge)
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(body, style = MaterialTheme.typography.bodyMedium)
+            if (state is LoginState.InProgress) {
+                Spacer(modifier = Modifier.height(14.dp))
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+        }
+    }
+}
+
+@Composable
+private fun CardField(label: String, value: String) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.medium,
+        colors = listCardColors(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        border = listCardBorder(),
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Text(
+                label,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                value,
+                style = MaterialTheme.typography.bodyLarge,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+    }
+}
 
 /** データ取得中に WebView を隠しておくための、ネイティブのつなぎ画面 */
 @Composable

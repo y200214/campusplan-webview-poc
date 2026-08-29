@@ -9,6 +9,7 @@ import jp.naramed.campusplanpoc.model.PageStructure
 import jp.naramed.campusplanpoc.model.PortalEvent
 import jp.naramed.campusplanpoc.model.SessionState
 import jp.naramed.campusplanpoc.model.SearchUiState
+import jp.naramed.campusplanpoc.nfc.FelicaReader
 import jp.naramed.campusplanpoc.model.SyllabusDigest
 import jp.naramed.campusplanpoc.model.SyllabusSearchResult
 import jp.naramed.campusplanpoc.model.TimeTable
@@ -27,6 +28,15 @@ import kotlinx.coroutines.flow.update
  *  - コールバックの一部（サブリソース観測）はワーカースレッドから来るので、
  *    状態更新はすべて MutableStateFlow.update（アトミック）で行う。
  */
+/** ログインの進行状況。カードタッチと手入力の両方で使う */
+sealed interface LoginState {
+    data object Idle : LoginState
+    /** カードは読めたが、登録済みのものと一致しない */
+    data object Mismatch : LoginState
+    data object InProgress : LoginState
+    data class Failed(val message: String) : LoginState
+}
+
 class PortalViewModel : ViewModel() {
 
     /**
@@ -43,6 +53,7 @@ class PortalViewModel : ViewModel() {
         TIMETABLE,
         SYLLABUS_LIST,
         SYLLABUS_SEARCH,
+        STUDENT_CARD,
         /** アプリ内ブラウザ。ネイティブ UI が無い機能を「意図的に」ポータルで開く */
         PORTAL,
         /** 開発用（debug ビルドのみ） */
@@ -104,6 +115,12 @@ class PortalViewModel : ViewModel() {
         val timeTableLoading: Boolean = false,
         /** Phase 5: シラバス検索（独自 UI から入力して実行する） */
         val search: SearchUiState = SearchUiState(),
+        /** Phase 6: 学生証の読み取り結果。画面を出ている間だけ持つ */
+        val cardRead: FelicaReader.Result? = null,
+        /** カード連携の登録済み IDm（未登録なら null） */
+        val registeredIdm: String? = null,
+        /** カードタッチによる自動ログインの進行状況 */
+        val loginState: LoginState = LoginState.Idle,
     ) {
         /** ログイン画面を出すべきか */
         val needsLogin: Boolean
@@ -228,6 +245,28 @@ class PortalViewModel : ViewModel() {
     /** ネイティブ UI が無い機能を、アプリ内ブラウザとして意図的に開く */
     fun openPortalView(title: String) {
         _state.update { it.copy(screen = AppScreen.PORTAL, portalTitle = title) }
+    }
+
+    /**
+     * 学生証を読み取った。
+     *
+     * この値は永続化しない。画面を離れれば消える。
+     * 読み取れた事実を見せるだけで、まだ何にも紐づけない。
+     */
+    fun onCardRead(result: FelicaReader.Result) {
+        _state.update { it.copy(cardRead = result) }
+    }
+
+    fun setRegisteredIdm(idm: String?) {
+        _state.update { it.copy(registeredIdm = idm) }
+    }
+
+    fun setLoginState(next: LoginState) {
+        _state.update { it.copy(loginState = next) }
+    }
+
+    fun clearCardRead() {
+        _state.update { it.copy(cardRead = null) }
     }
 
     fun setTimeTableLoading(loading: Boolean) {

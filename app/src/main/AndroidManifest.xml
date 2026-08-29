@@ -3,6 +3,15 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!--
+      Phase 6: 学生証（FeliCa）の読み取り。
+      読むのは画面を開いている間だけ（enableReaderMode）。
+      バックグラウンドでタグを拾う intent-filter は意図的に付けない。
+      NFC の無い端末でもインストールできるよう required="false"。
+    -->
+    <uses-permission android:name="android.permission.NFC" />
+    <uses-feature android:name="android.hardware.nfc" android:required="false" />
+
     <application
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"

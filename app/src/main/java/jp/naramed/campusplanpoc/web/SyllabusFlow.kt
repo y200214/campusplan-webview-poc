@@ -40,6 +40,18 @@ class SyllabusFlow(private val fetcher: PageFetcher) {
     private var pending: Pending? = null
 
     /**
+     * いまどの段階を待っているか。
+     *
+     * ポータル（/portal/）と CampusPlan Smart（/cpsmart/）は **セッションが別**。
+     * /portal/ にログインしただけでは /cpsmart/ は未認証で、参照画面の URL を
+     * 直接開いても cpsmart のログイン画面へ飛ばされる（2026-08-29 実測）。
+     * そのため、未認証なら先に SSO の入口を踏んでから参照画面へ進む。
+     */
+    private enum class Stage { NONE, SSO, SANSHO }
+
+    private var stage = Stage.NONE
+
+    /**
      * シラバス参照画面へ遷移し、読み込み完了後に取得する。
      * 必ずメインスレッドから呼ぶこと。
      */
@@ -63,20 +75,56 @@ class SyllabusFlow(private val fetcher: PageFetcher) {
         )
         pending = Pending(kogiCd, nendo, onResult)
 
-        Log.d(TAG, "シラバス参照画面へ遷移: kogiCd=$kogiCd nendo=$nendo")
-        webView.loadUrl(url)
+        // cpsmart に入れている（かつログイン画面ではない）ならそのまま参照画面へ
+        val onCpsmart = PortalConfig.isCpsmartUrl(webView.url) &&
+            !PortalConfig.isCpsmartLoginUrl(webView.url)
+        if (onCpsmart) {
+            stage = Stage.SANSHO
+            Log.d(TAG, "シラバス参照画面へ遷移: kogiCd=$kogiCd nendo=$nendo")
+            webView.loadUrl(url)
+        } else {
+            stage = Stage.SSO
+            Log.d(TAG, "cpsmart 未認証。先に SSO を通す: kogiCd=$kogiCd")
+            webView.loadUrl(PortalConfig.absoluteUrl(PortalConfig.CPSMART_SSO_PATH))
+        }
     }
 
     /**
      * ページ読み込み完了時に呼ぶ。
-     * 待っている要求があり、かつシラバス参照画面に着いていれば取得へ進む。
+     * SSO → 参照画面 の順に進み、着いたら取得へ移る。
      */
     fun onPageFinished(webView: WebView, url: String?) {
         val waiting = pending ?: return
-        if (!PortalConfig.isSyllabusSanshoUrl(url)) return
-        pending = null
-        Log.d(TAG, "シラバス参照画面に到達。取得へ進む: kogiCd=${waiting.kogiCd}")
-        fetcher.fetchSyllabus(webView, waiting.kogiCd, waiting.nendo, waiting.onResult)
+
+        // cpsmart のログイン画面に飛ばされた＝ポータル側のセッションも切れている
+        if (PortalConfig.isCpsmartLoginUrl(url)) {
+            Log.w(TAG, "cpsmart のログイン画面へ飛ばされた。SSO できていない")
+            pending = null
+            stage = Stage.NONE
+            waiting.onResult(
+                ApiResponse(ok = false, error = "ポータルのセッションが切れています。ログインし直してください")
+            )
+            return
+        }
+
+        when (stage) {
+            Stage.SSO -> {
+                if (!PortalConfig.isCpsmartUrl(url)) return
+                stage = Stage.SANSHO
+                Log.d(TAG, "SSO 完了。シラバス参照画面へ遷移: kogiCd=${waiting.kogiCd}")
+                webView.loadUrl(PortalConfig.syllabusSanshoUrl(waiting.kogiCd, waiting.nendo))
+            }
+
+            Stage.SANSHO -> {
+                if (!PortalConfig.isSyllabusSanshoUrl(url)) return
+                pending = null
+                stage = Stage.NONE
+                Log.d(TAG, "シラバス参照画面に到達。取得へ進む: kogiCd=${waiting.kogiCd}")
+                fetcher.fetchSyllabus(webView, waiting.kogiCd, waiting.nendo, waiting.onResult)
+            }
+
+            Stage.NONE -> Unit
+        }
     }
 
     /**
@@ -106,5 +154,6 @@ class SyllabusFlow(private val fetcher: PageFetcher) {
     /** 待機中の要求を破棄する（セッション破棄時など） */
     fun cancel() {
         pending = null
+        stage = Stage.NONE
     }
 }
