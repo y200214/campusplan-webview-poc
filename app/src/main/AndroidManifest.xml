@@ -45,7 +45,33 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!--
+              共用タブレットをこのアプリ専用機にするため、ホームアプリとしても
+              名乗れるようにする。既定にするかは利用者（または Device Owner）が決める。
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.HOME" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
         </activity>
+
+        <!--
+          端末専用モード（Dedicated Device）用の受け口。
+          adb shell dpm set-device-owner で Device Owner に設定したときだけ効く。
+          設定していない端末では何も起きない。
+        -->
+        <receiver
+            android:name=".kiosk.PortalDeviceAdminReceiver"
+            android:exported="true"
+            android:permission="android.permission.BIND_DEVICE_ADMIN">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/device_admin" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>

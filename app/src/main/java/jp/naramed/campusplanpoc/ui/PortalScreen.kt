@@ -72,6 +72,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import jp.naramed.campusplanpoc.auth.AdminLock
 import jp.naramed.campusplanpoc.auth.AppSettings
+import jp.naramed.campusplanpoc.kiosk.KioskManager
 import jp.naramed.campusplanpoc.auth.CredentialStore
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -1972,6 +1973,9 @@ private fun StudentCardPanel(
                         AutoLogoutSection(onRequireAdmin = { action -> requireAdmin(action) })
                     }
                     item {
+                        KioskSection(onRequireAdmin = { action -> requireAdmin(action) })
+                    }
+                    item {
                         AdminPinSection(
                             enabled = pinEnabled,
                             onChanged = { message = it },
@@ -2031,6 +2035,77 @@ private fun AutoLogoutSection(
                     }
                 },
             )
+        }
+    }
+}
+
+/**
+ * 端末専用モード（キオスク）の設定。
+ *
+ * 共用タブレットを「このアプリしか使えない端末」にする。
+ * 抜けられなくなると現場で詰むので、解除は必ず管理者操作の先に置く。
+ */
+@Composable
+private fun KioskSection(
+    onRequireAdmin: (() -> Unit) -> Unit,
+) {
+    val context = LocalContext.current
+    val activity = context as? android.app.Activity
+    val isOwner = remember { KioskManager.isDeviceOwner(context) }
+    var locked by remember {
+        mutableStateOf(activity?.let { KioskManager.isLocked(it) } ?: false)
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.medium,
+        colors = listCardColors(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        border = listCardBorder(),
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("このアプリだけ使える状態にする", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        when {
+                            locked && isOwner -> "固定中。ホームも戻るも効きません"
+                            locked -> "固定中。戻ると履歴の長押しで抜けられます"
+                            isOwner -> "専用端末として設定済み。固定できます"
+                            else -> "Device Owner 未設定のため、簡易的な固定のみです"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = locked,
+                    onCheckedChange = { next ->
+                        val act = activity ?: return@Switch
+                        if (next) {
+                            // 開始は誰でもよい。抜けるほうを守る
+                            KioskManager.startKiosk(act)
+                            if (isOwner) KioskManager.setAsHome(context)
+                            locked = true
+                        } else {
+                            onRequireAdmin {
+                                KioskManager.stopKiosk(act)
+                                locked = false
+                            }
+                        }
+                    },
+                )
+            }
+
+            if (!isOwner) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    "完全に固定するには、初期化直後の端末で Device Owner を設定する必要があります。" +
+                        "手順は docs/KIOSK-SETUP.md にあります。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }

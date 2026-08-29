@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  端末専用モードに必要な最小限の権限だけを宣言する。
+
+  Device Owner は強い権限を持つため、使わない機能は要求しない。
+  端末のワイプやパスワード強制は目的外なので入れていない。
+-->
+<device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-policies>
+        <!-- 画面固定の解除操作を検知するために必要 -->
+        <watch-login />
+    </uses-policies>
+</device-admin>
