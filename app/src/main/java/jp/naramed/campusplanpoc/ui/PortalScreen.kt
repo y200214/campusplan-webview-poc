@@ -45,6 +45,9 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -66,6 +69,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
+import jp.naramed.campusplanpoc.auth.AdminLock
 import jp.naramed.campusplanpoc.auth.CredentialStore
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -1619,6 +1623,69 @@ private fun StudentCardPanel(
     var removeTarget by remember { mutableStateOf<CredentialStore.Entry?>(null) }
 
     /*
+     * 共用端末では、他人の登録を勝手に消せないよう管理者 PIN で守る。
+     * PIN 未設定なら制限しない（個人端末での利用を邪魔しないため）。
+     *
+     * 一度通したら、この画面を開いている間は解除したままにする。
+     * 複数枚を続けて整理するのに毎回訊くのは煩わしいだけで、
+     * 画面を離れれば元に戻るので危険は増えない。
+     */
+    val pinEnabled = remember { AdminLock.isEnabled(context) }
+    var unlocked by remember { mutableStateOf(!pinEnabled) }
+    var pinPromptFor by remember { mutableStateOf<(() -> Unit)?>(null) }
+
+    fun requireAdmin(action: () -> Unit) {
+        if (unlocked) action() else pinPromptFor = action
+    }
+
+    pinPromptFor?.let { pendingAction ->
+        var pin by remember { mutableStateOf("") }
+        var wrong by remember { mutableStateOf(false) }
+        AlertDialog(
+            onDismissRequest = { pinPromptFor = null },
+            title = { Text("管理者PIN") },
+            text = {
+                Column {
+                    Text("登録の編集・削除には管理者PINが必要です。")
+                    Spacer(modifier = Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = pin,
+                        onValueChange = { pin = it; wrong = false },
+                        label = { Text("PIN") },
+                        singleLine = true,
+                        isError = wrong,
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.NumberPassword,
+                        ),
+                    )
+                    if (wrong) {
+                        Text(
+                            "PIN が違います",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    if (AdminLock.verify(context, pin)) {
+                        unlocked = true
+                        pinPromptFor = null
+                        pendingAction()
+                    } else {
+                        wrong = true
+                    }
+                }) { Text("解除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pinPromptFor = null }) { Text("キャンセル") }
+            },
+        )
+    }
+
+    /*
      * 登録済みのカードをかざした場合は、いきなり入力欄を出さない。
      * まず「誰のカードか」を見せて、編集するか削除するかを選ばせる。
      * 編集を選んだときだけ入力欄を出す。
@@ -1748,10 +1815,9 @@ private fun StudentCardPanel(
                                 }
                             }
                         }
-                        item { CardField("カード識別子 (IDm)", result.idm) }
                         item {
                             Button(
-                                onClick = { editing = true },
+                                onClick = { requireAdmin { editing = true } },
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .heightIn(min = 52.dp),
@@ -1759,7 +1825,7 @@ private fun StudentCardPanel(
                         }
                         item {
                             OutlinedButton(
-                                onClick = { removeTarget = known },
+                                onClick = { requireAdmin { removeTarget = known } },
                                 modifier = Modifier.fillMaxWidth(),
                             ) { Text("この登録を削除する") }
                         }
@@ -1771,7 +1837,6 @@ private fun StudentCardPanel(
                         }
                     } else {
                         val already = known != null
-                        item { CardField("カード識別子 (IDm)", result.idm) }
                         item {
                             Text(
                                 if (already) {
@@ -1883,47 +1948,220 @@ private fun StudentCardPanel(
                                 modifier = Modifier.padding(top = 8.dp, start = 4.dp),
                             )
                         }
-                        items(entries) { entry ->
-                            Card(
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = MaterialTheme.shapes.medium,
-                                colors = listCardColors(),
-                                elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
-                                border = listCardBorder(),
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(
-                                        start = 16.dp, end = 8.dp, top = 12.dp, bottom = 12.dp,
-                                    ),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            entry.label.ifBlank {
-                                                entry.loginId.ifBlank { "(名前なし)" }
-                                            },
-                                            style = MaterialTheme.typography.titleSmall,
-                                        )
-                                        Text(
-                                            buildString {
-                                                if (entry.loginId.isNotBlank() &&
-                                                    entry.label.isNotBlank()
-                                                ) {
-                                                    append(entry.loginId)
-                                                    append(" ・ ")
-                                                }
-                                                append(entry.idm)
-                                            },
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        )
-                                    }
-                                    TextButton(onClick = { removeTarget = entry }) { Text("削除") }
-                                }
-                            }
+                        items(entries, key = { it.idm }) { entry ->
+                            RegisteredCardRow(
+                                entry = entry,
+                                onRequestRemove = { requireAdmin { removeTarget = entry } },
+                            )
                         }
                     }
+
+                    // --- 管理者PIN の設定 ---
+                    item {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        AdminPinSection(
+                            enabled = pinEnabled,
+                            onChanged = { message = it },
+                        )
+                    }
                 }
+            }
+        }
+    }
+}
+
+/**
+ * 管理者PIN の設定。
+ *
+ * 共用端末で、他人の登録を勝手に消されないようにするための鍵。
+ * 未設定なら誰でも編集・削除できる（個人端末での利用を邪魔しないため）。
+ *
+ * これは端末上の歯止めであって、サーバ側の権限管理ではない。
+ * 画面にもその旨を書いて、過信されないようにする。
+ */
+@Composable
+private fun AdminPinSection(
+    enabled: Boolean,
+    onChanged: (String) -> Unit,
+) {
+    val context = LocalContext.current
+    var expanded by remember { mutableStateOf(false) }
+    var current by remember { mutableStateOf("") }
+    var newPin by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    // 設定直後に表示を切り替えるためのローカル状態
+    var isSet by remember { mutableStateOf(enabled) }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.medium,
+        colors = listCardColors(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        border = listCardBorder(),
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("管理者PIN", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        if (isSet) "設定済み。編集と削除にPINが必要です"
+                        else "未設定。誰でも編集・削除できます",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                TextButton(onClick = {
+                    expanded = !expanded
+                    error = null
+                    current = ""
+                    newPin = ""
+                }) { Text(if (expanded) "閉じる" else if (isSet) "変更" else "設定") }
+            }
+
+            if (expanded) {
+                Spacer(modifier = Modifier.height(12.dp))
+                if (isSet) {
+                    OutlinedTextField(
+                        value = current,
+                        onValueChange = { current = it; error = null },
+                        label = { Text("現在のPIN") },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.NumberPassword,
+                        ),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+                OutlinedTextField(
+                    value = newPin,
+                    onValueChange = { newPin = it; error = null },
+                    label = { Text(if (isSet) "新しいPIN（空にすると解除）" else "新しいPIN（4桁以上）") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                error?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+                Button(
+                    onClick = {
+                        if (isSet && !AdminLock.verify(context, current)) {
+                            error = "現在のPINが違います"
+                            return@Button
+                        }
+                        when {
+                            newPin.isBlank() && isSet -> {
+                                AdminLock.clearPin(context)
+                                isSet = false
+                                expanded = false
+                                onChanged("管理者PINを解除しました")
+                            }
+                            newPin.length < 4 -> error = "PIN は4桁以上にしてください"
+                            else -> {
+                                AdminLock.setPin(context, newPin)
+                                isSet = true
+                                expanded = false
+                                onChanged("管理者PINを設定しました")
+                            }
+                        }
+                        current = ""
+                        newPin = ""
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("保存") }
+
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    "この端末での誤操作を防ぐための鍵です。サーバ側の権限管理ではないため、" +
+                        "アプリを入れ直せば解除できます。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 登録済みカードの 1 行。
+ *
+ * 削除は 2 通り用意する。スワイプは慣れた人向けの近道で、
+ * 気づけなくても困らないよう「削除」ボタンも常に置いておく。
+ * どちらを使っても確認ダイアログは同じものを通す。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RegisteredCardRow(
+    entry: CredentialStore.Entry,
+    onRequestRemove: () -> Unit,
+) {
+    val dismissState = rememberSwipeToDismissBoxState(
+        confirmValueChange = { value ->
+            if (value != SwipeToDismissBoxValue.Settled) {
+                onRequestRemove()
+            }
+            // 確認ダイアログで決めるので、ここでは行を消さない（元に戻す）
+            false
+        },
+    )
+
+    SwipeToDismissBox(
+        state = dismissState,
+        backgroundContent = {
+            Surface(
+                modifier = Modifier.fillMaxSize(),
+                shape = MaterialTheme.shapes.medium,
+                color = MaterialTheme.colorScheme.errorContainer,
+                contentColor = MaterialTheme.colorScheme.onErrorContainer,
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 20.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("削除", style = MaterialTheme.typography.titleSmall)
+                    Text("削除", style = MaterialTheme.typography.titleSmall)
+                }
+            }
+        },
+    ) {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.medium,
+            colors = listCardColors(),
+            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+            border = listCardBorder(),
+        ) {
+            Row(
+                modifier = Modifier.padding(
+                    start = 16.dp, end = 8.dp, top = 12.dp, bottom = 12.dp,
+                ),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        entry.label.ifBlank { entry.loginId.ifBlank { "(名前なし)" } },
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    if (entry.label.isNotBlank() && entry.loginId.isNotBlank()) {
+                        Text(
+                            entry.loginId,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                TextButton(onClick = onRequestRemove) { Text("削除") }
             }
         }
     }
