@@ -2042,8 +2042,13 @@ private fun AutoLogoutSection(
 /**
  * 端末専用モード（キオスク）の設定。
  *
- * 共用タブレットを「このアプリしか使えない端末」にする。
- * 抜けられなくなると現場で詰むので、解除は必ず管理者操作の先に置く。
+ * **専用端末として構成済み（Device Owner）の端末にしか出さない。**
+ * 個人のスマホに入れただけの状態でうっかり有効化されると、
+ * 自分の端末が操作不能になったように見えて実害が出る。
+ * 条件を満たさない端末では項目ごと出さないことで、そもそも起こさない。
+ *
+ * 開始も解除も管理者操作の先に置く。
+ * ただし固定中は必ず表示する。解除の経路を消してはいけない。
  */
 @Composable
 private fun KioskSection(
@@ -2055,6 +2060,9 @@ private fun KioskSection(
     var locked by remember {
         mutableStateOf(activity?.let { KioskManager.isLocked(it) } ?: false)
     }
+
+    // 専用端末でなく、固定もされていないなら、この設定自体を見せない
+    if (!isOwner && !locked) return
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -2082,13 +2090,13 @@ private fun KioskSection(
                     checked = locked,
                     onCheckedChange = { next ->
                         val act = activity ?: return@Switch
-                        if (next) {
-                            // 開始は誰でもよい。抜けるほうを守る
-                            KioskManager.startKiosk(act)
-                            if (isOwner) KioskManager.setAsHome(context)
-                            locked = true
-                        } else {
-                            onRequireAdmin {
+                        // 開始も解除も管理者操作。誤操作で固定されるほうが実害が大きい
+                        onRequireAdmin {
+                            if (next) {
+                                KioskManager.startKiosk(act)
+                                if (isOwner) KioskManager.setAsHome(context)
+                                locked = true
+                            } else {
                                 KioskManager.stopKiosk(act)
                                 locked = false
                             }
@@ -2100,8 +2108,7 @@ private fun KioskSection(
             if (!isOwner) {
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    "完全に固定するには、初期化直後の端末で Device Owner を設定する必要があります。" +
-                        "手順は docs/KIOSK-SETUP.md にあります。",
+                    "この端末は専用端末として構成されていません。固定を解除してください。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
